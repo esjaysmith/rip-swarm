@@ -8,4 +8,6 @@ Cross-harness agent swarm coordination via a **git-backed hive** (not a hosted q
 
 Pillars: A install (`SKILL.md` / skills.sh-class) · B munder-shaped hive house, multi-push concurrency · C create-only claim files, first push wins (OpenMOSS-inspired leases; JSONL is audit) · D profiles (+ default) · E `/lookback` + `/status`.
 
-Status: spec + plan only — skill not built yet.
+Status: v0 runtime exists (`python -m rip_swarm`, `SKILL.md`, `scripts/`). After install: `python "$SKILL_DIR/scripts/status.py" -h`.
+
+Claims are create-only files; the first push wins. The hive is the `swarm` branch cloned into `_swarm/`.
