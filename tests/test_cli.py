@@ -200,6 +200,108 @@ class TestCli(unittest.TestCase):
             0,
         )
 
+    def test_claim_orchestrator_denied(self):
+        self._seed_alice_bob()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main([
+                "claim", "--hive", str(self.hive), "--task", "orchestrator",
+                "--agent", "alice", "--harness", "claude-code", "--local",
+            ])
+        self.assertIn(rc, (1, 2))
+        self.assertFalse((self.hive / "claims" / "orchestrator.json").exists())
+        self.assertFalse((self.hive / "orchestrator" / "CURRENT.json").exists())
+
+    def test_complete_reject_orchestrator_denied(self):
+        self._seed_alice_bob()
+        text = (self.hive / "profiles" / "default.yaml").read_text(encoding="utf-8")
+        (self.hive / "profiles" / "default.yaml").write_text(
+            text.replace("allow_self_promote: false", "allow_self_promote: true"),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            main([
+                "promote", "--hive", str(self.hive), "--agent", "alice",
+                "--harness", "claude-code", "--reason", "operator designated", "--local",
+            ]),
+            0,
+        )
+        with redirect_stderr(io.StringIO()):
+            self.assertIn(
+                main([
+                    "complete", "--hive", str(self.hive), "--task", "orchestrator",
+                    "--agent", "alice", "--result-ref", "x", "--local",
+                ]),
+                (1, 2),
+            )
+        self.assertTrue((self.hive / "orchestrator" / "CURRENT.json").exists())
+        self.assertTrue((self.hive / "claims" / "orchestrator.json").exists())
+        with redirect_stderr(io.StringIO()):
+            self.assertIn(
+                main([
+                    "reject", "--hive", str(self.hive), "--task", "orchestrator",
+                    "--agent", "alice", "--local",
+                ]),
+                (1, 2),
+            )
+        self.assertTrue((self.hive / "orchestrator" / "CURRENT.json").exists())
+        self.assertTrue((self.hive / "claims" / "orchestrator.json").exists())
+
+    def _hive_with_upstream(self) -> None:
+        origin = Path(self.tmp.name) / "origin.git"
+        subprocess.check_call(
+            ["git", "init", "--bare", "-q", "-b", "swarm", str(origin)],
+            stdout=subprocess.DEVNULL,
+        )
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["init", "--hive", str(self.hive), "--no-git"]), 0)
+        (self.hive / "agents" / "registry.yaml").write_text(
+            "- id: alice\n  harness: claude-code\n  role: worker\n"
+            "- id: bob\n  harness: codex\n  role: worker\n"
+            "- id: op\n  harness: claude-code\n  role: operator\n",
+            encoding="utf-8",
+        )
+        subprocess.check_call(
+            ["git", "init", "-q", "-b", "swarm", str(self.hive)],
+            stdout=subprocess.DEVNULL,
+        )
+        for k, v in (("user.email", "t@example.com"), ("user.name", "T"), ("commit.gpgsign", "false")):
+            subprocess.check_call(["git", "-C", str(self.hive), "config", k, v])
+        subprocess.check_call(["git", "-C", str(self.hive), "add", "-A"], stdout=subprocess.DEVNULL)
+        subprocess.check_call(["git", "-C", str(self.hive), "commit", "-qm", "seed"])
+        subprocess.check_call(["git", "-C", str(self.hive), "remote", "add", "origin", str(origin)])
+        subprocess.check_call(
+            ["git", "-C", str(self.hive), "push", "-q", "-u", "origin", "swarm"],
+            stdout=subprocess.DEVNULL,
+        )
+
+    def test_lookback_then_claim_with_upstream(self):
+        self._hive_with_upstream()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(main(["lookback", "--hive", str(self.hive)]), 0)
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(self.hive), "status", "--porcelain"], text=True
+            ),
+            "",
+        )
+        self.assertTrue(list((self.hive / "lookback").glob("*.md")))
+        self.assertEqual(
+            main(["inbox-add", "--hive", str(self.hive), "--title", "Pub", "--created-by", "op"]),
+            0,
+        )
+        inbox = list((self.hive / "inbox").glob("task_*.json"))
+        self.assertEqual(len(inbox), 1)
+        task_id = inbox[0].stem
+        self.assertEqual(
+            main([
+                "claim", "--hive", str(self.hive), "--task", task_id,
+                "--agent", "alice", "--harness", "claude-code",
+            ]),
+            0,
+        )
+
     def test_publish_when_hive_has_upstream(self):
         origin = Path(self.tmp.name) / "origin.git"
         subprocess.check_call(

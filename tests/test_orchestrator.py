@@ -3,10 +3,16 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from rip_swarm.claim import ClaimDenied
+from rip_swarm.claim import ClaimDenied, complete, reject
 from rip_swarm.io import atomic_write_json, read_json
-from rip_swarm.orchestrator import current_matches_claim, promote, read_current, release_orchestrator
-from rip_swarm.timeutil import add_seconds
+from rip_swarm.orchestrator import (
+    current_matches_claim,
+    heartbeat_orchestrator,
+    promote,
+    read_current,
+    release_orchestrator,
+)
+from rip_swarm.timeutil import add_seconds, format_z
 
 T0 = datetime(2026, 9, 17, 9, 1, 0, tzinfo=timezone.utc)
 
@@ -111,6 +117,48 @@ class TestOrchestrator(unittest.TestCase):
         self.assertFalse((self.hive / "orchestrator" / "CURRENT.json").exists())
         self.assertFalse((self.hive / "claims" / "orchestrator.json").exists())
         self.assertTrue(current_matches_claim(self.hive, T0))  # both absent = no orchestrator = healthy
+
+    def test_heartbeat_repairs_current_from_claim(self):
+        promote(
+            self.hive, agent="alice", harness="claude-code", now=T0,
+            lease_seconds=1800, reason="operator designated",
+            allow_self_promote=True, operators=[],
+        )
+        claim = read_json(self.hive / "claims" / "orchestrator.json")
+        atomic_write_json(
+            self.hive / "orchestrator" / "CURRENT.json",
+            {
+                "agent": "bob",
+                "harness": "codex",
+                "lease_expires_at": "2026-09-17T09:31:00Z",
+                "reason": "keep-me",
+                "claim_id": "clm_nope",
+            },
+        )
+        repaired = heartbeat_orchestrator(
+            self.hive, agent="alice", now=T0, lease_seconds=1800
+        )
+        self.assertEqual(repaired["agent"], "alice")
+        self.assertEqual(repaired["harness"], "claude-code")
+        self.assertEqual(repaired["claim_id"], claim["claim_id"])
+        self.assertEqual(repaired["reason"], "keep-me")
+        self.assertEqual(repaired["lease_expires_at"], format_z(add_seconds(T0, 1800)))
+        self.assertEqual(read_current(self.hive)["agent"], "alice")
+        self.assertEqual(read_current(self.hive)["claim_id"], claim["claim_id"])
+
+    def test_complete_reject_orchestrator_leave_current(self):
+        promote(
+            self.hive, agent="alice", harness="claude-code", now=T0,
+            lease_seconds=1800, reason="a", allow_self_promote=True, operators=[],
+        )
+        with self.assertRaises(ClaimDenied):
+            complete(self.hive, "orchestrator", "alice", T0, result_ref="x")
+        self.assertTrue((self.hive / "orchestrator" / "CURRENT.json").exists())
+        self.assertTrue((self.hive / "claims" / "orchestrator.json").exists())
+        with self.assertRaises(ClaimDenied):
+            reject(self.hive, "orchestrator", "alice", T0)
+        self.assertTrue((self.hive / "orchestrator" / "CURRENT.json").exists())
+        self.assertTrue((self.hive / "claims" / "orchestrator.json").exists())
 
 if __name__ == "__main__":
     unittest.main()

@@ -114,18 +114,20 @@ def heartbeat_orchestrator(
 ) -> dict:
     claim = heartbeat(hive, "orchestrator", agent, now, lease_seconds)
     current = read_current(hive)
-    if current is None:
-        current = {
-            "agent": claim["agent"],
-            "harness": claim["harness"],
-            "reason": "",
-            "claim_id": claim["claim_id"],
-        }
-    else:
-        current = dict(current)
-    current["lease_expires_at"] = claim["expires_at"]
-    atomic_write_json(HivePaths(hive).current, current)
-    return current
+    reason = ""
+    if isinstance(current, dict):
+        kept = current.get("reason")
+        if isinstance(kept, str):
+            reason = kept
+    repaired = {
+        "agent": claim["agent"],
+        "harness": claim["harness"],
+        "lease_expires_at": claim["expires_at"],
+        "reason": reason,
+        "claim_id": claim["claim_id"],
+    }
+    atomic_write_json(HivePaths(hive).current, repaired)
+    return repaired
 
 
 def release_orchestrator(

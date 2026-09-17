@@ -100,8 +100,7 @@ def _dispatch(args: argparse.Namespace) -> object:
     if args.command == "status":
         return format_status(status_report(hive, now))
     if args.command == "lookback":
-        path = write_lookback(hive, now, load_profile(hive, args.profile))
-        return str(path)
+        return _lookback(args, hive, now)
     if args.command == "inbox-add":
         return _inbox_add(args, hive, now)
     if args.command == "complete":
@@ -155,8 +154,30 @@ def _inbox_add(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     )
 
 
+def _lookback(args: argparse.Namespace, hive: Path, now: datetime) -> str:
+    profile = load_profile(hive, args.profile)
+
+    def op() -> dict:
+        path = write_lookback(hive, now, profile)
+        return {"path": str(path)}
+
+    if args.local or not _hive_can_publish(hive):
+        return str(write_lookback(hive, now, profile))
+    doc = _run_op(
+        hive,
+        local=False,
+        task_id="__none__",
+        message="lookback",
+        op=op,
+        now=now,
+    )
+    return str(doc["path"])
+
+
 def _claim(args: argparse.Namespace, hive: Path, now: datetime, profile: dict) -> dict:
     task_id = _require(args.task, "--task")
+    if task_id == "orchestrator":
+        raise ClaimDenied("orchestrator baton is acquired with promote, not claim")
     agent = _require(args.agent, "--agent")
     harness = _require(args.harness, "--harness")
 
@@ -336,6 +357,15 @@ def _run_op(
         if captured.get("doc") is not None and "nothing to commit" in str(e).lower():
             return captured["doc"]
         raise
+
+
+def _hive_can_publish(hive: Path) -> bool:
+    try:
+        assert_hive_repo(hive)
+        upstream(hive)
+    except (NotHiveRepo, GitopsError):
+        return False
+    return True
 
 
 def _require_publishable(hive: Path) -> None:
