@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rip-swarm.local/schema/claim.schema.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["task_id", "claim_id", "agent", "harness", "exclusive", "created_at", "expires_at"],
+  "properties": {
+    "task_id": {"type": "string"},
+    "claim_id": {"type": "string", "pattern": "^clm_"},
+    "agent": {"type": "string"},
+    "harness": {"type": "string"},
+    "exclusive": {"type": "boolean", "const": true},
+    "created_at": {"type": "string", "pattern": "Z$"},
+    "expires_at": {"type": "string", "pattern": "Z$"},
+    "note": {"type": ["string", "null"]}
+  }
+}

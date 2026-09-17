@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rip-swarm.local/schema/registry.schema.json",
+  "type": "array",
+  "additionalProperties": true,
+  "items": {
+    "type": "object",
+    "additionalProperties": true,
+    "required": ["id", "harness", "role"],
+    "properties": {
+      "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+      "harness": {"type": "string"},
+      "role": {
+        "type": "string",
+        "enum": ["operator", "orchestrator", "worker", "observer"]
+      }
+    }
+  }
+}

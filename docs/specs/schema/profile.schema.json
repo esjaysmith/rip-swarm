@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rip-swarm.local/schema/profile.schema.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["name", "orchestrator_lease_ttl", "worker_lease_ttl", "allow_self_promote", "allow_preempt", "operators", "budget"],
+  "properties": {
+    "name": {"type": "string"},
+    "orchestrator_lease_ttl": {"type": ["string", "integer"]},
+    "worker_lease_ttl": {"type": ["string", "integer"]},
+    "allow_self_promote": {"type": "boolean"},
+    "allow_preempt": {"type": "boolean"},
+    "operators": {"type": "array", "items": {"type": "string"}},
+    "budget": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "max_claims_open_per_agent": {"type": "integer"},
+        "spend_requires_operator": {"type": "boolean"}
+      }
+    }
+  }
+}
