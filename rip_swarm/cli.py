@@ -24,6 +24,7 @@ from rip_swarm.orchestrator import heartbeat_orchestrator, promote, release_orch
 from rip_swarm.paths import resolve_hive
 from rip_swarm.policy import try_claim_with_policy
 from rip_swarm.profile import load_profile
+from rip_swarm.registry import require_agent
 from rip_swarm.status import format_status, status_report
 from rip_swarm.timeutil import now_utc, parse_duration
 
@@ -110,7 +111,7 @@ def _dispatch(args: argparse.Namespace) -> object:
     hive = resolve_hive(args.hive)
     now = now_utc()
     if getattr(args, "local", False) and _hive_can_publish(hive):
-        _warn_local_on_publishable(hive)
+        _gate_local_on_publishable(hive)
     if args.command == "status":
         # Resolve the profile the same way every other command does so an
         # unknown --profile behaves consistently (profile.py falls back).
@@ -151,6 +152,25 @@ def _require(value: str | None, flag: str) -> str:
     return str(value)
 
 
+def _resolve_harness(hive: Path, agent: str, given: str | None) -> str:
+    """The registry is the source of truth for an agent's harness (§5 trust).
+
+    `--harness` is therefore optional: omitted, it is read from the registry entry.
+    Supplying a different one is a mistake the library would refuse anyway
+    (ClaimDenied), so the CLI names it here where the operator can see both values.
+    """
+    registered = str(require_agent(hive, agent)["harness"])
+    if given is None or not str(given).strip():
+        return registered
+    given = str(given)
+    if given != registered:
+        raise ClaimDenied(
+            f"--harness {given!r} does not match the registry harness "
+            f"{registered!r} for agent {agent!r}; omit --harness to use the registry"
+        )
+    return given
+
+
 def _inbox_add(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     def op() -> dict:
         return create_task(
@@ -168,6 +188,7 @@ def _inbox_add(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
         message=f"inbox-add {args.title}",
         op=op,
         now=now,
+        allow=["inbox/*.json"],
     )
 
 
@@ -187,14 +208,22 @@ def _lookback(args: argparse.Namespace, hive: Path, now: datetime) -> str:
         message="lookback",
         op=op,
         now=now,
+        allow=[f"{_lookback_dir(profile)}/*.md"],
     )
     return str(doc["path"])
+
+
+def _lookback_dir(profile: dict) -> str:
+    """The profile's lookback `write_dir`, as a hive-relative glob prefix."""
+    cfg = profile.get("lookback") if isinstance(profile, dict) else None
+    raw = cfg.get("write_dir") if isinstance(cfg, dict) else None
+    return str(raw or "lookback/").strip("/") or "lookback"
 
 
 def _claim(args: argparse.Namespace, hive: Path, now: datetime, profile: dict) -> dict:
     task_id = _require(args.task, "--task")
     agent = _require(args.agent, "--agent")
-    harness = _require(args.harness, "--harness")
+    harness = _resolve_harness(hive, agent, args.harness)
 
     def op() -> dict:
         return try_claim_with_policy(
@@ -221,6 +250,8 @@ def _claim(args: argparse.Namespace, hive: Path, now: datetime, profile: dict) -
 def _heartbeat(args: argparse.Namespace, hive: Path, now: datetime, profile: dict) -> dict:
     task_id = _require(args.task, "--task")
     agent = _require(args.agent, "--agent")
+    # --harness is optional; when given it must match the registry (§5 trust).
+    _resolve_harness(hive, agent, args.harness)
     if task_id == "orchestrator":
         lease = parse_duration(profile["orchestrator_lease_ttl"])
 
@@ -249,6 +280,8 @@ def _heartbeat(args: argparse.Namespace, hive: Path, now: datetime, profile: dic
 def _complete(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     task_id = _require(args.task, "--task")
     agent = _require(args.agent, "--agent")
+    # --harness is optional; when given it must match the registry (§5 trust).
+    _resolve_harness(hive, agent, args.harness)
     result_ref = _require(args.result_ref, "--result-ref")
 
     def op() -> dict:
@@ -268,6 +301,8 @@ def _complete(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
 def _release(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     task_id = _require(args.task, "--task")
     agent = _require(args.agent, "--agent")
+    # --harness is optional; when given it must match the registry (§5 trust).
+    _resolve_harness(hive, agent, args.harness)
     if task_id == "orchestrator":
 
         def op() -> dict:
@@ -292,6 +327,8 @@ def _release(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
 def _reject(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     task_id = _require(args.task, "--task")
     agent = _require(args.agent, "--agent")
+    # --harness is optional; when given it must match the registry (§5 trust).
+    _resolve_harness(hive, agent, args.harness)
 
     def op() -> dict:
         return reject(hive, task_id, agent, now, args.note)
@@ -309,7 +346,7 @@ def _reject(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
 
 def _promote(args: argparse.Namespace, hive: Path, now: datetime, profile: dict) -> dict:
     agent = _require(args.agent, "--agent")
-    harness = _require(args.harness, "--harness")
+    harness = _resolve_harness(hive, agent, args.harness)
     operators = profile.get("operators") or []
     if not isinstance(operators, list):
         operators = []
@@ -349,6 +386,7 @@ def _run_op(
     op: Callable[[], dict],
     agent: str | None = None,
     now: datetime | None = None,
+    allow: list[str] | None = None,
 ) -> dict:
     if local:
         return op()
@@ -367,6 +405,7 @@ def _run_op(
             message=message,
             agent=agent,
             now=now,
+            allow=allow,
         )
     except GitopsError as e:
         if captured.get("doc") is not None and "nothing to commit" in str(e).lower():
@@ -401,7 +440,25 @@ def _dirty_hint(hive: Path) -> str:
     )
 
 
-def _warn_local_on_publishable(hive: Path) -> None:
+ALLOW_LOCAL_ENV = "RIP_SWARM_ALLOW_LOCAL"
+
+
+def _gate_local_on_publishable(hive: Path) -> None:
+    """Refuse --local on a hive that could publish, unless explicitly opted in.
+
+    --local writes hive files without committing, so on a publishable hive it leaves
+    a dirty work-tree that makes every later publish fail with DirtyHive. That is a
+    test/debug affordance, not an operator workflow, so it takes a deliberate
+    environment opt-in; the warning still fires when it is allowed.
+    """
+    if os.environ.get(ALLOW_LOCAL_ENV) != "1":
+        raise GitopsError(
+            f"refusing --local on a publishable hive at {hive}.\n"
+            "--local skips git, so the writes stay uncommitted and the dirty "
+            "work-tree blocks every later publish.\n"
+            "Drop --local to publish normally, or, if you really want the "
+            f"uncommitted writes, set {ALLOW_LOCAL_ENV}=1 to allow it."
+        )
     print(
         f"warning: --local skips git on a publishable hive at {hive}.\n"
         "It leaves the work-tree dirty, which blocks every later publish.\n"

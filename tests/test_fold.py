@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from rip_swarm.claim import complete, try_claim
+from rip_swarm.claim import claim_baton, complete, try_claim
 from rip_swarm.fold import (
     Corrupt,
     Expired,
@@ -20,10 +20,24 @@ from rip_swarm.timeutil import add_seconds
 
 T0 = datetime(2026, 9, 17, 9, 1, 0, tzinfo=timezone.utc)
 
+REGISTRY = (
+    "- id: alice\n  harness: claude-code\n  role: worker\n"
+    "- id: bob\n  harness: codex\n  role: worker\n"
+    "- id: carol\n  harness: cursor\n  role: operator\n"
+)
+
+
+def seed_registry(hive, body=REGISTRY):
+    p = hive / "agents" / "registry.yaml"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    return p
+
 class TestFold(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.hive = Path(self.tmp.name)
+        seed_registry(self.hive)
         self.task = create_task(self.hive, title="T", created_by="op", now=T0)
 
     def tearDown(self):
@@ -64,7 +78,7 @@ class TestFold(unittest.TestCase):
         self.assertEqual(active_set(self.hive, T0), {})
 
     def test_orchestrator_baton_not_counted(self):
-        try_claim(self.hive, "orchestrator", "alice", "claude-code", T0, 1800)
+        claim_baton(self.hive, "alice", "claude-code", T0, 1800)
         self.assertEqual(open_claim_count(self.hive, "alice", T0), 0)
         self.assertIn("orchestrator", active_set(self.hive, T0))
 
@@ -150,6 +164,46 @@ class TestFold(unittest.TestCase):
     def test_tombstones_ignored_by_active_set(self):
         self._write_claim("task_zzz.complete.20260917T090100Z.json", self._good("task_zzz"))
         self.assertEqual(active_set(self.hive, T0), {})
+        self.assertEqual(corrupt_claims(self.hive), [])
+
+    # --- m2: crash window between tombstone write and active unlink ----------
+
+    def _plant_crash_window(self, task_id=None):
+        """Recreate a kill between `_finalize`'s tombstone write and unlink."""
+        tid = task_id or self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        active = self.hive / "claims" / f"{tid}.json"
+        body = active.read_text(encoding="utf-8")
+        (self.hive / "claims" / f"{tid}.complete.20260917T090100Z.json").write_text(
+            body, encoding="utf-8"
+        )
+        return tid
+
+    def test_active_plus_complete_tombstone_folds_corrupt(self):
+        tid = self._plant_crash_window()
+        rec = active_holder(self.hive, tid, T0)
+        self.assertIsInstance(rec, Corrupt)
+        self.assertEqual(rec.error, "active claim and complete tombstone coexist")
+
+    def test_crash_window_excluded_from_active_set_and_budget(self):
+        tid = self._plant_crash_window()
+        self.assertNotIn(tid, active_set(self.hive, T0))
+        self.assertEqual(open_claim_count(self.hive, "alice", T0), 0)
+
+    def test_crash_window_listed_by_corrupt_claims(self):
+        tid = self._plant_crash_window()
+        recs = corrupt_claims(self.hive)
+        self.assertEqual([r.task_id for r in recs], [tid])
+        self.assertEqual(recs[0].error, "active claim and complete tombstone coexist")
+
+    def test_release_tombstone_does_not_trip_the_crash_window(self):
+        tid = self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        body = (self.hive / "claims" / f"{tid}.json").read_text(encoding="utf-8")
+        (self.hive / "claims" / f"{tid}.release.20260917T090100Z.json").write_text(
+            body, encoding="utf-8"
+        )
+        self.assertIsInstance(active_holder(self.hive, tid, T0), Holder)
         self.assertEqual(corrupt_claims(self.hive), [])
 
 if __name__ == "__main__":

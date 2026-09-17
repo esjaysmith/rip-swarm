@@ -194,7 +194,7 @@ class TestGitops(unittest.TestCase):
 
         t2 = publish(
             self.ha, task_id="__none__", op=add_task, message="inbox-add U",
-            agent="alice", now=T0,
+            agent="alice", now=T0, allow=["inbox/*.json"],
         )
         profile = {
             "worker_lease_ttl": "15m",
@@ -259,7 +259,10 @@ class TestGitops(unittest.TestCase):
             path = write_lookback(self.ha, T0)
             return {"path": str(path)}
 
-        publish(self.ha, task_id="__none__", op=op, message="lookback", agent="alice", now=T0)
+        publish(
+            self.ha, task_id="__none__", op=op, message="lookback",
+            agent="alice", now=T0, allow=["lookback/*.md"],
+        )
         self.assertEqual(
             subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
             "",
@@ -587,6 +590,7 @@ class TestGitops(unittest.TestCase):
                     message="reg a",
                     agent="alice",
                     now=T0,
+                    allow=["agents/registry.yaml"],
                 )
             return real_run(hive, *args, check=check)
 
@@ -600,6 +604,7 @@ class TestGitops(unittest.TestCase):
                     message="reg b",
                     agent="bob",
                     now=T0,
+                    allow=["agents/registry.yaml"],
                 )
         finally:
             gitops._run = real_run
@@ -669,6 +674,240 @@ class TestGitops(unittest.TestCase):
                 ["git", "rev-parse", "@{u}"], cwd=self.hb, text=True
             ).strip(),
         )
+
+
+    # --- M1: publish commits only the paths the op is allowed to write (section 8.5) ---
+
+    def _remote_tree(self, hive):
+        return subprocess.check_output(
+            ["git", "-C", str(hive), "ls-tree", "-r", "--name-only", "origin/swarm"],
+            text=True,
+        )
+
+    def test_op_writing_outside_allowlist_is_refused_and_nothing_is_pushed(self):
+        from rip_swarm.claim import try_claim
+        from rip_swarm.gitops import GitopsError
+
+        def op():
+            doc = try_claim(self.ha, self.task["id"], "alice", "claude-code", T0, 900)
+            (self.ha / "UNRELATED_LEAK.txt").write_text("secret\n", encoding="utf-8")
+            return doc
+
+        with self.assertRaises(GitopsError) as ctx:
+            publish(
+                self.ha,
+                task_id=self.task["id"],
+                op=op,
+                message=f"claim {self.task['id']}",
+                agent="alice",
+                now=T0,
+            )
+        self.assertIn("UNRELATED_LEAK.txt", str(ctx.exception))
+        self.assertNotIsInstance(ctx.exception, ClaimDenied)
+        # tree clean, leak gone, and neither the leak nor the claim reached the remote
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+        self.assertFalse((self.ha / "UNRELATED_LEAK.txt").exists())
+        _git(self.ha, "fetch")
+        listed = self._remote_tree(self.ha)
+        self.assertNotIn("UNRELATED_LEAK.txt", listed)
+        self.assertNotIn(f"claims/{self.task['id']}.json", listed)
+
+    def test_pre_existing_scratch_file_is_never_swept_into_a_commit(self):
+        # An untracked file that predates the op makes the hive dirty, so publish
+        # refuses up front rather than committing someone else's scratch file.
+        (self.ha / "scratch.env").write_text("TOKEN=x\n", encoding="utf-8")
+        with self.assertRaises(DirtyHive):
+            claim_and_publish(
+                self.ha, task_id=self.task["id"], agent="alice",
+                harness="claude-code", now=T0, lease_seconds=900,
+            )
+        self.assertTrue((self.ha / "scratch.env").exists())
+        _git(self.ha, "fetch")
+        self.assertNotIn("scratch.env", self._remote_tree(self.ha))
+
+    def test_allowlist_star_does_not_cross_a_slash(self):
+        from rip_swarm.gitops import GitopsError
+
+        def op():
+            nested = self.ha / "agents" / "alice" / "outbox" / "deep"
+            nested.mkdir(parents=True, exist_ok=True)
+            (nested / "x.json").write_text("{}\n", encoding="utf-8")
+            return {}
+
+        with self.assertRaises(GitopsError) as ctx:
+            publish(
+                self.ha, task_id="__none__", op=op, message="x",
+                agent="alice", now=T0,
+            )
+        self.assertIn("agents/alice/outbox/deep/x.json", str(ctx.exception))
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+
+    def test_default_allow_covers_the_claim_lifecycle(self):
+        from rip_swarm.gitops import default_allow
+
+        allow = default_allow("task_01ABC", "alice")
+        self.assertIn("claims/task_01ABC.json", allow)
+        self.assertIn("claims/task_01ABC.*.json", allow)
+        self.assertIn("store/claims.jsonl", allow)
+        self.assertIn("store/messages.jsonl", allow)
+        self.assertIn("agents/alice/outbox/*.json", allow)
+        self.assertIn("orchestrator/CURRENT.json", default_allow("orchestrator", "alice"))
+
+    def test_default_allow_treats_ids_as_literals_not_globs(self):
+        from rip_swarm.gitops import _match_allow, default_allow
+
+        allow = tuple(default_allow("task_[x]*", "alice"))
+        self.assertTrue(_match_allow("claims/task_[x]*.json", allow))
+        self.assertFalse(_match_allow("claims/task_x.json", allow))
+        self.assertFalse(_match_allow("claims/task_anything.json", allow))
+
+    def test_lifecycle_ops_publish_under_the_default_allowlist(self):
+        from rip_swarm.claim import complete, heartbeat, reject, release
+
+        claim_and_publish(
+            self.ha, task_id=self.task["id"], agent="alice", harness="claude-code",
+            now=T0, lease_seconds=900,
+        )
+        publish(
+            self.ha, task_id=self.task["id"], message="heartbeat",
+            op=lambda: heartbeat(self.ha, self.task["id"], "alice", T0, 900),
+            agent="alice", now=T0,
+        )
+        publish(
+            self.ha, task_id=self.task["id"], message="complete",
+            op=lambda: complete(self.ha, self.task["id"], "alice", T0, "out"),
+            agent="alice", now=T0,
+        )
+        for action, fn in (("release", release), ("reject", reject)):
+            task = publish(
+                self.ha,
+                task_id="__none__",
+                op=lambda: create_task(self.ha, title=action, created_by="op", now=T0),
+                message=f"inbox-add {action}",
+                agent="alice",
+                now=T0,
+                allow=["inbox/*.json"],
+            )
+            claim_and_publish(
+                self.ha, task_id=task["id"], agent="alice", harness="claude-code",
+                now=T0, lease_seconds=900,
+            )
+            publish(
+                self.ha, task_id=task["id"], message=action,
+                op=(lambda t=task["id"], f=fn: f(self.ha, t, "alice", T0, None)),
+                agent="alice", now=T0,
+            )
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+        _git(self.ha, "fetch")
+        listed = self._remote_tree(self.ha)
+        self.assertIn("store/claims.jsonl", listed)
+        self.assertIn(f"claims/{self.task['id']}.complete.", listed)
+
+    def test_promote_and_release_orchestrator_publish_under_the_default_allowlist(self):
+        from rip_swarm.gitops import promote_and_publish
+        from rip_swarm.orchestrator import release_orchestrator
+
+        promote_and_publish(
+            self.ha, agent="alice", harness="claude-code", now=T0,
+            lease_seconds=1800, reason="designated", allow_self_promote=True,
+            operators=[],
+        )
+        _git(self.ha, "fetch")
+        self.assertIn("orchestrator/CURRENT.json", self._remote_tree(self.ha))
+        publish(
+            self.ha,
+            task_id="orchestrator",
+            op=lambda: release_orchestrator(self.ha, agent="alice", now=T0, note=None),
+            message="release orchestrator",
+            agent="alice",
+            now=T0,
+        )
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+        _git(self.ha, "fetch")
+        self.assertNotIn("orchestrator/CURRENT.json", self._remote_tree(self.ha))
+
+    # --- M2: claim_and_publish honours registry + budget (section 5) ---
+
+    def test_claim_and_publish_refuses_unregistered_agent(self):
+        from rip_swarm.registry import UnknownAgent
+
+        before = subprocess.check_output(
+            ["git", "-C", str(self.ha), "rev-parse", "origin/swarm"], text=True
+        ).strip()
+        with self.assertRaises(UnknownAgent):
+            claim_and_publish(
+                self.ha, task_id=self.task["id"], agent="ghost",
+                harness="claude-code", now=T0, lease_seconds=900,
+            )
+        _git(self.ha, "fetch")
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(self.ha), "rev-parse", "origin/swarm"], text=True
+            ).strip(),
+            before,
+        )
+        self.assertFalse((self.ha / "claims" / f"{self.task['id']}.json").exists())
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+
+    def test_claim_and_publish_enforces_the_open_claim_cap(self):
+        claim_and_publish(
+            self.ha, task_id=self.task["id"], agent="alice", harness="claude-code",
+            now=T0, lease_seconds=900,
+        )
+        second = publish(
+            self.ha,
+            task_id="__none__",
+            op=lambda: create_task(self.ha, title="U", created_by="op", now=T0),
+            message="inbox-add U",
+            agent="alice",
+            now=T0,
+            allow=["inbox/*.json"],
+        )
+        # default profile caps open claims at 1: budget_block is published, then denied.
+        with self.assertRaises(ClaimDenied) as ctx:
+            claim_and_publish(
+                self.ha, task_id=second["id"], agent="alice", harness="claude-code",
+                now=T0, lease_seconds=900,
+            )
+        self.assertIn("max_claims_open_per_agent", str(ctx.exception))
+        _git(self.ha, "fetch")
+        remote_msgs = subprocess.check_output(
+            ["git", "-C", str(self.ha), "show", "origin/swarm:store/messages.jsonl"],
+            text=True,
+        )
+        self.assertIn("budget_block", remote_msgs)
+        self.assertFalse((self.ha / "claims" / f"{second['id']}.json").exists())
+        self.assertNotIn(
+            f"claims/{second['id']}.json", self._remote_tree(self.ha)
+        )
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+
+    def test_claim_and_publish_refuses_the_orchestrator_baton(self):
+        with self.assertRaises(ClaimDenied):
+            claim_and_publish(
+                self.ha, task_id="orchestrator", agent="alice",
+                harness="claude-code", now=T0, lease_seconds=900,
+            )
+        self.assertFalse((self.ha / "claims" / "orchestrator.json").exists())
+        self.assertFalse((self.ha / "orchestrator" / "CURRENT.json").exists())
 
 
 if __name__ == "__main__":

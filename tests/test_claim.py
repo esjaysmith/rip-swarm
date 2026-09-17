@@ -3,18 +3,33 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from rip_swarm.claim import ClaimDenied, complete, heartbeat, reject, release, tombstone_claim, try_claim
+from rip_swarm.claim import ClaimDenied, claim_baton, complete, heartbeat, reject, release, tombstone_claim, try_claim
 from rip_swarm.inbox import create_task
+from rip_swarm.registry import UnknownAgent
 from rip_swarm.io import read_json
 from rip_swarm.timeutil import add_seconds, format_z, parse_z
 import json
 
 T0 = datetime(2026, 9, 17, 9, 1, 0, tzinfo=timezone.utc)
 
+REGISTRY = (
+    "- id: alice\n  harness: claude-code\n  role: worker\n"
+    "- id: bob\n  harness: codex\n  role: worker\n"
+    "- id: carol\n  harness: cursor\n  role: operator\n"
+)
+
+
+def seed_registry(hive, body=REGISTRY):
+    p = hive / "agents" / "registry.yaml"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(body, encoding="utf-8")
+    return p
+
 class TestClaim(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.hive = Path(self.tmp.name)
+        seed_registry(self.hive)
         self.task = create_task(self.hive, title="T", created_by="op", now=T0)
 
     def tearDown(self):
@@ -70,8 +85,8 @@ class TestClaim(unittest.TestCase):
         with self.assertRaises(ClaimDenied):
             try_claim(self.hive, "task_01J00000000000000000000000", "alice", "claude-code", T0, 900)
 
-    def test_orchestrator_needs_no_inbox(self):
-        doc = try_claim(self.hive, "orchestrator", "alice", "claude-code", T0, 1800)
+    def test_claim_baton_needs_no_inbox(self):
+        doc = claim_baton(self.hive, "alice", "claude-code", T0, 1800)
         self.assertEqual(doc["task_id"], "orchestrator")
 
     def test_reclaim_by_holder_is_idempotent(self):
@@ -253,6 +268,87 @@ class TestClaim(unittest.TestCase):
         with self.assertRaises(ClaimDenied):
             try_claim(self.hive, "../pwned", "alice", "claude-code", T0, 900)
         self.assertFalse(outside.exists())
+
+    # --- M2: registry gate at the primitive layer -----------------------------
+    def _claims_snapshot(self):
+        claims = self.hive / "claims"
+        if not claims.is_dir():
+            return set()
+        return {p.name for p in claims.iterdir()}
+
+    def test_unregistered_agent_refused_on_every_primitive(self):
+        tid = self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        before = self._claims_snapshot()
+        calls = {
+            "try_claim": lambda: try_claim(self.hive, tid, "ghost", "codex", T0, 900),
+            "heartbeat": lambda: heartbeat(self.hive, tid, "ghost", T0, 900),
+            "complete": lambda: complete(self.hive, tid, "ghost", T0, result_ref="r"),
+            "release": lambda: release(self.hive, tid, "ghost", T0),
+            "reject": lambda: reject(self.hive, tid, "ghost", T0),
+            "claim_baton": lambda: claim_baton(self.hive, "ghost", "codex", T0, 1800),
+        }
+        for name, call in calls.items():
+            with self.subTest(primitive=name):
+                with self.assertRaises(UnknownAgent):
+                    call()
+                self.assertEqual(self._claims_snapshot(), before)
+
+    def test_unregistered_agent_writes_no_audit_line(self):
+        with self.assertRaises(UnknownAgent):
+            try_claim(self.hive, self.task["id"], "ghost", "codex", T0, 900)
+        self.assertEqual(self._audit(), [])
+
+    def test_harness_mismatch_on_try_claim_denied(self):
+        with self.assertRaises(ClaimDenied) as ctx:
+            try_claim(self.hive, self.task["id"], "alice", "totally-wrong", T0, 900)
+        msg = str(ctx.exception)
+        self.assertIn("claude-code", msg)
+        self.assertIn("totally-wrong", msg)
+        self.assertFalse((self.hive / "claims" / f"{self.task['id']}.json").exists())
+
+    def test_harness_mismatch_on_claim_baton_denied(self):
+        with self.assertRaises(ClaimDenied):
+            claim_baton(self.hive, "alice", "codex", T0, 1800)
+        self.assertFalse((self.hive / "claims" / "orchestrator.json").exists())
+
+    def test_registered_second_harness_is_accepted(self):
+        t2 = create_task(self.hive, title="T2", created_by="op", now=T0)
+        doc = try_claim(self.hive, t2["id"], "bob", "codex", T0, 900)
+        self.assertEqual(doc["agent"], "bob")
+
+    # --- M3: the baton is promote-only ----------------------------------------
+    def test_try_claim_refuses_orchestrator(self):
+        with self.assertRaises(ClaimDenied) as ctx:
+            try_claim(self.hive, "orchestrator", "alice", "claude-code", T0, 1800)
+        self.assertIn("promote", str(ctx.exception))
+        self.assertFalse((self.hive / "claims" / "orchestrator.json").exists())
+
+    def test_claim_baton_steal_and_idempotence(self):
+        a = claim_baton(self.hive, "alice", "claude-code", T0, 1800)
+        again = claim_baton(self.hive, "alice", "claude-code", add_seconds(T0, 10), 1800)
+        self.assertEqual(a["claim_id"], again["claim_id"])
+        with self.assertRaises(ClaimDenied):
+            claim_baton(self.hive, "bob", "codex", T0, 1800)
+        later = add_seconds(T0, 1801)
+        stolen = claim_baton(self.hive, "bob", "codex", later, 1800)
+        self.assertEqual(stolen["agent"], "bob")
+        self.assertTrue(list((self.hive / "claims").glob("orchestrator.expired.*")))
+
+    # --- m5: claimable ids follow the inbox pattern ---------------------------
+    def test_planted_non_ulid_inbox_task_is_not_claimable(self):
+        planted = self.hive / "inbox" / "weird-task.json"
+        planted.parent.mkdir(parents=True, exist_ok=True)
+        planted.write_text(json.dumps({"id": "weird-task"}), encoding="utf-8")
+        with self.assertRaises(ClaimDenied):
+            try_claim(self.hive, "weird-task", "alice", "claude-code", T0, 900)
+        self.assertFalse((self.hive / "claims" / "weird-task.json").exists())
+
+    def test_reserved_and_malformed_ids_refused(self):
+        for tid in ["weird-task", "task_lowercase", "CURRENT", "registry", "task_01J"]:
+            with self.subTest(tid=tid):
+                with self.assertRaises(ClaimDenied):
+                    try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
 
 if __name__ == "__main__":
     unittest.main()

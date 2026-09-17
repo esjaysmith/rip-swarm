@@ -7,10 +7,10 @@ from pathlib import Path
 from rip_swarm.audit import append_claim_audit
 from rip_swarm.claim import (
     ClaimDenied,
+    claim_baton,
     heartbeat,
     release,
     tombstone_claim,
-    try_claim,
 )
 from rip_swarm.io import atomic_write_json, read_json
 from rip_swarm.outbox import write_message
@@ -81,13 +81,21 @@ def promote(
     by: str | None = None,
 ) -> dict:
     by = by or agent
-    require_agent(hive, agent)
+    agent_rec = require_agent(hive, agent)
     by_rec = require_agent(hive, by)
+    # registry.yaml is the SoT for an agent's harness: refuse a caller that
+    # disagrees, then take CURRENT/body.harness from the registry entry itself.
+    if harness != agent_rec["harness"]:
+        raise ClaimDenied(
+            f"harness mismatch for {agent}: registry says "
+            f"{agent_rec['harness']!r}, got {harness!r}"
+        )
+    harness = agent_rec["harness"]
     if not (by in operators or (by == agent and allow_self_promote)):
         raise ClaimDenied(f"{by} cannot promote {agent}")
     # The reason is persisted into the claim file's note so heartbeat can
     # repair CURRENT.json (an untrusted mirror) from the claim (the SoT).
-    claim = try_claim(hive, "orchestrator", agent, harness, now, lease_seconds, reason)
+    claim = claim_baton(hive, agent, harness, now, lease_seconds, reason)
     if claim.get("note") != reason:
         # Re-promoting a baton this agent already holds is idempotent on the
         # claim, so refresh the note to keep it the SoT for `reason`.

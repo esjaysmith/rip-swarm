@@ -5,9 +5,7 @@
 **Audience:** operator + implementer  
 **Related:** spec v0.2 §3, §8.5, §11, §13 (R1); plan architecture + Task 12 init.
 
-Spec today: hive = orphan branch `swarm` on the **project repo**, pushed to the project remote (`origin/swarm`), checked out as a **linked git worktree** at `<repo>/_swarm/` (gitignored on code branches).
-
-This note asks whether the **worktree** half is required, or whether a simpler checkout still satisfies every lock.
+Spec today: hive = orphan branch `swarm` on the **project repo**, pushed to the project remote (`origin/swarm`), checked out as a **nested single-branch clone** at `<repo>/_swarm/` (gitignored on code branches). That is option C below, locked on 2026-09-17 in spec §13 and folded into §3/§11. The paragraphs that follow are kept **as the decision record** — they argue from the pre-option-C state (a linked git worktree) to the choice that now stands; read them as history, not as an open question.
 
 ---
 

@@ -3,7 +3,7 @@
   "$id": "https://rip-swarm.local/schema/message.schema.json",
   "type": "object",
   "additionalProperties": true,
-  "required": ["id", "ts", "type", "topic", "from", "to", "body", "profile"],
+  "required": ["id", "ts", "type", "topic", "from", "to", "ref", "body", "profile"],
   "properties": {
     "id": {"type": "string", "pattern": "^msg_"},
     "ts": {"type": "string", "pattern": "Z$"},
@@ -22,6 +22,15 @@
       }
     },
     "to": {"type": "string"},
+    "ref": {
+      "type": "object",
+      "additionalProperties": true,
+      "properties": {
+        "claim_id": {"type": ["string", "null"]},
+        "task_id": {"type": ["string", "null"]},
+        "in_reply_to": {"type": ["string", "null"]}
+      }
+    },
     "body": {"type": "object"},
     "profile": {"type": "string"}
   }

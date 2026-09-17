@@ -1,16 +1,19 @@
 # rip_swarm/gitops.py
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import shutil
 import subprocess
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
 
-from rip_swarm.claim import ClaimDenied, try_claim
+from rip_swarm.claim import ClaimDenied
 from rip_swarm.orchestrator import promote
+from rip_swarm.policy import try_claim_with_policy
+from rip_swarm.profile import load_profile
 from rip_swarm.timeutil import parse_z
 
 # Isolate from the project checkout: never inherit GIT_DIR / GIT_WORK_TREE.
@@ -245,11 +248,77 @@ def _ff_only(hive: Path) -> None:
     _run(hive, "merge", "--ff-only", "--no-edit", "@{u}")
 
 
-def _commit_op(hive: Path, message: str) -> None:
-    _run(hive, "add", "-u")
-    untracked = _untracked_relpaths(hive)
-    if untracked:
-        _run(hive, "add", "--", *untracked)
+def default_allow(task_id: str, agent: str | None) -> list[str]:
+    """Paths an ordinary claim-lifecycle op is allowed to write (§8.5).
+
+    Hive-relative glob patterns. `claims/<task_id>.*.json` covers the tombstones
+    `_finalize` / `tombstone_claim` write next to the active claim path.
+    """
+    allow = ["store/claims.jsonl", "store/messages.jsonl"]
+    if task_id and task_id != "__none__":
+        tid = _glob_quote(task_id)
+        allow += [
+            f"claims/{tid}.json",
+            f"claims/{tid}.*.json",
+            f"inbox/{tid}.json",
+        ]
+    if task_id == "orchestrator":
+        allow.append("orchestrator/CURRENT.json")
+    if agent:
+        allow.append(f"agents/{_glob_quote(agent)}/outbox/*.json")
+    return allow
+
+
+def _glob_quote(literal: str) -> str:
+    """Escape glob metacharacters so an id is matched literally, never as a pattern."""
+    return "".join("[" + ch + "]" if ch in "*?[]" else ch for ch in literal)
+
+
+def _match_allow(rel: str, patterns: tuple[str, ...]) -> bool:
+    """Whole-path glob match: `*` never crosses a `/`, unlike PurePath.match."""
+    segments = rel.split("/")
+    for pattern in patterns:
+        parts = pattern.split("/")
+        if len(parts) != len(segments):
+            continue
+        if all(fnmatch.fnmatchcase(s, p) for s, p in zip(segments, parts)):
+            return True
+    return False
+
+
+def _changed_relpaths(hive: Path) -> list[str]:
+    """Every path the op touched, relative to the hive root.
+
+    The tree was clean before `op` ran, so `git status` *is* the write set. A rename
+    reports both sides; both must be inside the allowlist.
+    """
+    raw = _run(hive, "status", "-z", "--porcelain", "-uall").stdout
+    out: list[str] = []
+    for _xy, path, extra in _iter_porcelain_z(raw):
+        for item in (path, extra):
+            if item:
+                out.append(item.rstrip("/"))
+    return sorted(set(out))
+
+
+def _commit_op(hive: Path, message: str, allow: tuple[str, ...]) -> None:
+    """Stage exactly the paths the op wrote, and only if all of them are allowed.
+
+    Spec §8.5 says "commit only the paths written": a generic `git add -A` would
+    sweep any scratch file, secret, or leftover living in the hive into permanent
+    hive history (no force-push allowed to undo it). Anything outside `allow` is a
+    bug in the op, so the whole op is refused -- its own writes are not committed
+    either, because a half-trusted commit is worse than none.
+    """
+    changed = _changed_relpaths(hive)
+    unexpected = [rel for rel in changed if not _match_allow(rel, allow)]
+    if unexpected:
+        raise GitopsError(
+            "op wrote paths outside its allowlist: " + ", ".join(unexpected)
+        )
+    if not changed:
+        raise GitopsError("nothing to commit")
+    _run(hive, "add", "--", *changed)
     _run(hive, "commit", "-m", message)
 
 
@@ -313,12 +382,19 @@ def publish(
     agent: str,
     now: datetime,
     max_attempts: int = 5,
+    allow: Iterable[str] | None = None,
 ) -> dict:
     """Run `op` in the hive and push the resulting commit (§8.5).
 
     `agent` and `now` are required: without them the remote-tip check cannot tell our
     own claim from a foreign one, nor a live lease from an expired one, so the race
     protection silently degrades and a lost race surfaces as a rebase failure.
+
+    `allow` is the set of hive-relative glob patterns this op may write; `None` means
+    the claim-lifecycle default for `task_id` / `agent` (`default_allow`). Callers
+    that write elsewhere -- lookback reports, new inbox tasks -- pass their own
+    patterns. Writing outside the allowlist aborts the publish, reverts the tree and
+    raises GitopsError: see `_commit_op`.
 
     Unpushed local commits (rule): publish never `reset --hard`s over a commit the
     remote does not have. When HEAD is ahead of `@{u}` publish refuses without
@@ -331,6 +407,7 @@ def publish(
     commit is already on the remote.
     """
     hive = hive.resolve()
+    patterns = tuple(default_allow(task_id, agent) if allow is None else allow)
     assert_hive_repo(hive)
     assert_clean(hive)
     upstream(hive)
@@ -371,7 +448,7 @@ def publish(
             if denial is not None:
                 raise denial
             raise GitopsError("nothing to commit")
-        _commit_op(hive, message)
+        _commit_op(hive, message, patterns)
         _push_with_retries(
             hive,
             task_id=task_id,
@@ -396,11 +473,31 @@ def claim_and_publish(
     agent: str,
     harness: str,
     now: datetime,
-    lease_seconds: int,
+    lease_seconds: int | None = None,
     note: str | None = None,
+    profile: dict | None = None,
 ) -> dict:
+    """Claim `task_id` under the hive's policy, then publish (§5 trust + budget).
+
+    Routed through `try_claim_with_policy`, not raw `try_claim`: the registry check
+    and `max_claims_open_per_agent` are part of the claim contract, so a harness that
+    imports this helper cannot claim as an unregistered id or past its cap. The lease
+    comes from the profile's `worker_lease_ttl` unless `lease_seconds` overrides it.
+    """
+    cfg = load_profile(hive, None) if profile is None else profile
+    if lease_seconds is not None:
+        cfg = {**cfg, "worker_lease_ttl": f"{int(lease_seconds)}s"}
+
     def op() -> dict:
-        return try_claim(hive, task_id, agent, harness, now, lease_seconds, note)
+        return try_claim_with_policy(
+            hive,
+            task_id=task_id,
+            agent=agent,
+            harness=harness,
+            now=now,
+            profile=cfg,
+            note=note,
+        )
 
     return publish(
         hive,

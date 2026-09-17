@@ -12,7 +12,14 @@ from rip_swarm.timeutil import add_seconds
 
 T0 = datetime(2026, 9, 17, 9, 1, 0, tzinfo=timezone.utc)
 
-def _reg(hive, body="- id: alice\n  harness: claude-code\n  role: worker\n"):
+REGISTRY = (
+    "- id: alice\n  harness: claude-code\n  role: worker\n"
+    "- id: bob\n  harness: codex\n  role: worker\n"
+    "- id: carol\n  harness: cursor\n  role: operator\n"
+)
+
+
+def _reg(hive, body=REGISTRY):
     p = hive / "agents" / "registry.yaml"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(body, encoding="utf-8")
@@ -59,10 +66,13 @@ class TestStatus(unittest.TestCase):
         self.assertEqual(r["jsonl_parse_errors"][0]["line"], 1)
 
     def test_unknown_agent_on_claim(self):
+        # try_claim now refuses unregistered agents, so an unknown id can only
+        # reach a claim file by being planted or by leaving the registry.
         t = create_task(self.hive, title="T", created_by="op", now=T0)
-        try_claim(self.hive, t["id"], "ghost", "codex", T0, 900)
+        try_claim(self.hive, t["id"], "alice", "claude-code", T0, 900)
+        _reg(self.hive, "- id: bob\n  harness: codex\n  role: worker\n")
         r = status_report(self.hive, T0)
-        self.assertIn("ghost", r["unknown_agents"])
+        self.assertIn("alice", r["unknown_agents"])
         self.assertIn(t["id"], format_status(r))
 
     def test_expired_claim_file(self):
@@ -73,7 +83,10 @@ class TestStatus(unittest.TestCase):
 
     def test_orchestrator_excluded_from_active_claims(self):
         t = create_task(self.hive, title="T", created_by="op", now=T0)
-        try_claim(self.hive, "orchestrator", "alice", "claude-code", T0, 1800)
+        promote(
+            self.hive, agent="alice", harness="claude-code", now=T0,
+            lease_seconds=1800, reason="a", allow_self_promote=True, operators=[],
+        )
         try_claim(self.hive, t["id"], "alice", "claude-code", T0, 900)
         r = status_report(self.hive, T0)
         self.assertEqual([c["task_id"] for c in r["active_claims"]], [t["id"]])
@@ -112,6 +125,25 @@ class TestStatus(unittest.TestCase):
         r = status_report(self.hive, T0)
         self.assertEqual(r["corrupt_claims"], [])
         self.assertIn("corrupt_claims:", format_status(r))
+
+    # --- m2: active claim + complete tombstone after a crash -----------------
+
+    def test_crash_window_reported_corrupt_not_active(self):
+        t = create_task(self.hive, title="T", created_by="op", now=T0)
+        try_claim(self.hive, t["id"], "alice", "claude-code", T0, 900)
+        active = self.hive / "claims" / f"{t['id']}.json"
+        (self.hive / "claims" / f"{t['id']}.complete.20260917T090100Z.json").write_text(
+            active.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        r = status_report(self.hive, T0)
+        self.assertEqual(r["active_claims"], [])
+        self.assertEqual(
+            [(c["task_id"], c["error"]) for c in r["corrupt_claims"]],
+            [(t["id"], "active claim and complete tombstone coexist")],
+        )
+        self.assertEqual(r["inbox_without_claim"], [])
+        out = format_status(r)
+        self.assertIn("active claim and complete tombstone coexist", out)
 
 if __name__ == "__main__":
     unittest.main()

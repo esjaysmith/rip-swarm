@@ -15,7 +15,7 @@ HEADINGS = [
     "# Lookback 2026-09-17",
     "## Double claims",
     "## Expired leases",
-    "## CURRENT vs last promote",
+    "## CURRENT vs orchestrator claim",
     "## Inbox with no claim",
     "## JSONL parse errors",
     "## Suggested PROTOCOL/profile diffs",

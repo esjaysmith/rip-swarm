@@ -1,15 +1,30 @@
 # tests/test_cli.py
 import io
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from pathlib import Path
 from rip_swarm.cli import main
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@contextmanager
+def _allow_local():
+    """Opt in to --local on a publishable hive for the duration of the block."""
+    before = os.environ.get("RIP_SWARM_ALLOW_LOCAL")
+    os.environ["RIP_SWARM_ALLOW_LOCAL"] = "1"
+    try:
+        yield
+    finally:
+        if before is None:
+            os.environ.pop("RIP_SWARM_ALLOW_LOCAL", None)
+        else:
+            os.environ["RIP_SWARM_ALLOW_LOCAL"] = before
 
 
 class TestCli(unittest.TestCase):
@@ -439,10 +454,26 @@ class TestCli(unittest.TestCase):
         self.assertFalse((self.hive / "claims" / "orchestrator.json").exists())
         self.assertFalse((self.hive / "orchestrator" / "CURRENT.json").exists())
 
-    def test_local_on_publishable_hive_warns(self):
+    def test_local_on_publishable_hive_refused_without_opt_in(self):
+        # n1: --local on a hive that can publish leaves uncommitted writes that block
+        # every later publish, so it takes a deliberate env opt-in.
         self._hive_with_upstream()
         err = io.StringIO()
         with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = main([
+                "inbox-add", "--hive", str(self.hive), "--title", "L",
+                "--created-by", "op", "--local",
+            ])
+        self.assertEqual(rc, 1)
+        msg = err.getvalue()
+        self.assertIn("RIP_SWARM_ALLOW_LOCAL", msg)
+        self.assertIn("--local", msg)
+        self.assertEqual(list((self.hive / "inbox").glob("task_*.json")), [])
+
+    def test_local_on_publishable_hive_warns_when_allowed(self):
+        self._hive_with_upstream()
+        err = io.StringIO()
+        with _allow_local(), redirect_stdout(io.StringIO()), redirect_stderr(err):
             rc = main([
                 "inbox-add", "--hive", str(self.hive), "--title", "L",
                 "--created-by", "op", "--local",
@@ -451,6 +482,19 @@ class TestCli(unittest.TestCase):
         msg = err.getvalue()
         self.assertIn("--local", msg)
         self.assertIn(f"git -C {self.hive} status", msg)
+
+    def test_local_without_upstream_needs_no_opt_in(self):
+        # Every other --local test runs on a hive with no upstream; the gate must not
+        # fire there, or the env var would become mandatory for ordinary offline use.
+        self.assertNotIn("RIP_SWARM_ALLOW_LOCAL", os.environ)
+        self._seed_alice_bob()
+        self.assertEqual(
+            main([
+                "inbox-add", "--hive", str(self.hive), "--title", "NoUp",
+                "--created-by", "op", "--local",
+            ]),
+            0,
+        )
 
     def test_dirty_hive_error_names_recovery(self):
         self._hive_with_upstream()
@@ -552,6 +596,79 @@ class TestCli(unittest.TestCase):
             "",
         )
 
+        # Every real CLI op must still publish under the M1 allowlist, and each must
+        # leave the hive clean -- an over-tight allowlist would show up here.
+        def run(*argv):
+            with redirect_stdout(io.StringIO()):
+                rc = main([*argv, "--hive", str(hive)])
+            self.assertEqual(rc, 0, argv)
+            self.assertEqual(
+                subprocess.check_output(
+                    ["git", "-C", str(hive), "status", "--porcelain"], text=True
+                ),
+                "",
+                argv,
+            )
+
+        run("heartbeat", "--task", task_id, "--agent", "alice")
+        run("complete", "--task", task_id, "--result-ref", "out/x", "--agent", "alice")
+        t2 = self._add_via_cli(hive, "Second")
+        run("claim", "--task", t2, "--agent", "alice")
+        run("release", "--task", t2, "--agent", "alice")
+        t3 = self._add_via_cli(hive, "Third")
+        run("claim", "--task", t3, "--agent", "alice")
+        run("reject", "--task", t3, "--agent", "alice")
+        self._allow_self_promote(hive)
+        run("promote", "--agent", "alice", "--reason", "designated")
+        run("heartbeat", "--task", "orchestrator", "--agent", "alice")
+        run("release", "--task", "orchestrator", "--agent", "alice")
+        run("lookback")
+
+        final = subprocess.check_output(
+            ["git", "--git-dir", str(origin), "ls-tree", "-r", "--name-only", "swarm"],
+            text=True,
+        )
+        for expected in (
+            f"claims/{task_id}.complete.",
+            f"claims/{t2}.release.",
+            f"claims/{t3}.reject.",
+            "store/claims.jsonl",
+            "store/messages.jsonl",
+            "agents/alice/outbox/",
+            "lookback/",
+        ):
+            self.assertIn(expected, final, expected)
+        # released baton: neither the claim nor the CURRENT mirror survives
+        self.assertNotIn("orchestrator/CURRENT.json", final)
+        self.assertNotIn("claims/orchestrator.json\n", final)
+
+    def _add_via_cli(self, hive: Path, title: str) -> str:
+        before = {p.stem for p in (hive / "inbox").glob("task_*.json")}
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(
+                main([
+                    "inbox-add", "--hive", str(hive), "--title", title,
+                    "--created-by", "op",
+                ]),
+                0,
+            )
+        after = {p.stem for p in (hive / "inbox").glob("task_*.json")}
+        return (after - before).pop()
+
+    def _allow_self_promote(self, hive: Path) -> None:
+        path = hive / "profiles" / "default.yaml"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "allow_self_promote: false", "allow_self_promote: true"
+            ),
+            encoding="utf-8",
+        )
+        subprocess.check_call(["git", "-C", str(hive), "add", "-A"], stdout=subprocess.DEVNULL)
+        subprocess.check_call(["git", "-C", str(hive), "commit", "-qm", "self promote"])
+        subprocess.check_call(
+            ["git", "-C", str(hive), "push", "-q", "origin", "HEAD"], stdout=subprocess.DEVNULL
+        )
+
     def test_cli_two_clone_lost_race(self):
         origin = self._bare_project_origin()
         work_a = self._project_clone("work_a", origin)
@@ -587,6 +704,127 @@ class TestCli(unittest.TestCase):
             ),
             "",
         )
+
+
+    # --- m1: --harness is optional and must agree with the registry ---
+
+    def test_claim_without_harness_uses_the_registry(self):
+        self._seed_alice_bob()
+        task_id = self._add()
+        self.assertEqual(
+            main([
+                "claim", "--hive", str(self.hive), "--task", task_id,
+                "--agent", "alice", "--local",
+            ]),
+            0,
+        )
+        claim = json.loads(
+            (self.hive / "claims" / f"{task_id}.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(claim["harness"], "claude-code")
+
+    def test_claim_with_mismatched_harness_exits_two(self):
+        self._seed_alice_bob()
+        task_id = self._add()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main([
+                "claim", "--hive", str(self.hive), "--task", task_id,
+                "--agent", "alice", "--harness", "codex", "--local",
+            ])
+        self.assertEqual(rc, 2)
+        msg = err.getvalue()
+        self.assertIn("codex", msg)
+        self.assertIn("claude-code", msg)
+        self.assertIn("--harness", msg)
+        self.assertFalse((self.hive / "claims" / f"{task_id}.json").exists())
+
+    def test_promote_without_harness_uses_the_registry(self):
+        self._seed_alice_bob()
+        path = self.hive / "profiles" / "default.yaml"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("operators: []", "operators: [op]"),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            main([
+                "promote", "--hive", str(self.hive), "--agent", "alice",
+                "--by", "op", "--reason", "designated", "--local",
+            ]),
+            0,
+        )
+        current = json.loads(
+            (self.hive / "orchestrator" / "CURRENT.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(current["harness"], "claude-code")
+
+    def test_promote_with_mismatched_harness_exits_two(self):
+        self._seed_alice_bob()
+        path = self.hive / "profiles" / "default.yaml"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("operators: []", "operators: [op]"),
+            encoding="utf-8",
+        )
+        with redirect_stderr(io.StringIO()):
+            rc = main([
+                "promote", "--hive", str(self.hive), "--agent", "alice",
+                "--harness", "totally-wrong", "--by", "op", "--local",
+            ])
+        self.assertEqual(rc, 2)
+        self.assertFalse((self.hive / "orchestrator" / "CURRENT.json").exists())
+        self.assertFalse((self.hive / "claims" / "orchestrator.json").exists())
+
+    def test_lifecycle_commands_accept_no_harness_and_reject_a_wrong_one(self):
+        self._seed_alice_bob()
+        task_id = self._add()
+        self.assertEqual(
+            main([
+                "claim", "--hive", str(self.hive), "--task", task_id,
+                "--agent", "alice", "--local",
+            ]),
+            0,
+        )
+        for argv in (
+            ["heartbeat", "--task", task_id, "--agent", "alice"],
+            ["complete", "--task", task_id, "--agent", "alice", "--result-ref", "x"],
+        ):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = main([*argv, "--hive", str(self.hive), "--harness", "codex", "--local"])
+            self.assertEqual(rc, 2, argv)
+            self.assertIn("--harness", err.getvalue())
+        # and with no --harness at all they work
+        self.assertEqual(
+            main([
+                "heartbeat", "--hive", str(self.hive), "--task", task_id,
+                "--agent", "alice", "--local",
+            ]),
+            0,
+        )
+        self.assertEqual(
+            main([
+                "complete", "--hive", str(self.hive), "--task", task_id,
+                "--agent", "alice", "--result-ref", "x", "--local",
+            ]),
+            0,
+        )
+
+    def test_unknown_agent_is_refused_before_any_write(self):
+        self._seed_alice_bob()
+        task_id = self._add()
+        for argv in (
+            ["claim", "--task", task_id, "--agent", "ghost"],
+            ["heartbeat", "--task", task_id, "--agent", "ghost"],
+            ["release", "--task", task_id, "--agent", "ghost"],
+            ["reject", "--task", task_id, "--agent", "ghost"],
+            ["complete", "--task", task_id, "--agent", "ghost", "--result-ref", "x"],
+        ):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                rc = main([*argv, "--hive", str(self.hive), "--local"])
+            self.assertIn(rc, (1, 2), argv)
+            self.assertIn("ghost", err.getvalue(), argv)
+        self.assertFalse((self.hive / "claims" / f"{task_id}.json").exists())
 
 
 if __name__ == "__main__":

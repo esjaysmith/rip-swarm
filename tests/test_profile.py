@@ -9,6 +9,7 @@ from rip_swarm.inbox import create_task
 from rip_swarm.orchestrator import promote
 from rip_swarm.policy import try_claim_with_policy
 from rip_swarm.profile import DEFAULT_PROFILE, deep_merge, load_profile
+from rip_swarm.registry import UnknownAgent
 from rip_swarm.timeutil import parse_duration
 
 T0 = datetime(2026, 9, 17, 9, 1, 0, tzinfo=timezone.utc)
@@ -225,6 +226,29 @@ class TestProfile(unittest.TestCase):
         path = self.hive / "store" / "messages.jsonl"
         if path.exists():
             self.assertNotIn("budget_block", path.read_text(encoding="utf-8"))
+
+    # --- M2/m1 at the policy layer -------------------------------------------
+
+    def test_policy_claim_refuses_unregistered_agent(self):
+        t1 = create_task(self.hive, title="one", created_by="op", now=T0)
+        profile = load_profile(self.hive, "default")
+        with self.assertRaises(UnknownAgent):
+            try_claim_with_policy(
+                self.hive, task_id=t1["id"], agent="ghost", harness="codex",
+                now=T0, profile=profile,
+            )
+        self.assertFalse((self.hive / "claims" / f"{t1['id']}.json").exists())
+
+    def test_policy_claim_refuses_harness_mismatch(self):
+        t1 = create_task(self.hive, title="one", created_by="op", now=T0)
+        profile = load_profile(self.hive, "default")
+        with self.assertRaises(ClaimDenied) as ctx:
+            try_claim_with_policy(
+                self.hive, task_id=t1["id"], agent="alice", harness="totally-wrong",
+                now=T0, profile=profile,
+            )
+        self.assertIn("claude-code", str(ctx.exception))
+        self.assertFalse((self.hive / "claims" / f"{t1['id']}.json").exists())
 
 if __name__ == "__main__":
     unittest.main()

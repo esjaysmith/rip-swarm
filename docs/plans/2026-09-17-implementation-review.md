@@ -136,16 +136,16 @@ Pillars A–E from the spec are present in code: Agent Skills packaging (`SKILL.
 |-----------|----------------|-------|
 | Create-only claim SoT; JSONL audit | Yes | fold ignores JSONL |
 | Inbox SoT; helpers require inbox (except orchestrator) | Yes on try_claim | |
-| Baton = claim + CURRENT same commit | Yes via `promote` | Library `try_claim(orchestrator)` can partial (M3) |
-| Publish: clean → fetch → tip check → op → commit paths → push ≤5 | Mostly | tip check + retries yes; **commit stages all untracked (M1)** |
+| Baton = claim + CURRENT same commit | Yes | M3 fixed: baton only via `claim_baton` (promote-only) |
+| Publish: clean → fetch → tip check → op → commit paths → push ≤5 | Yes | M1 fixed: staging is allow-listed per op |
 | `merge=union` on `store/*.jsonl` | Yes | template + two-clone test |
-| Registry refuse unknown | Partial | claim/promote/outbox yes; lifecycle CLI + `claim_and_publish` no (M2) |
-| Budget cap + budget_block | Yes on CLI claim path | bypassed by `claim_and_publish` (M2) |
+| Registry refuse unknown | Yes | M2 fixed: gate moved to the claim primitive |
+| Budget cap + budget_block | Yes | M2 fixed: enforced at the primitive, not only the CLI |
 | `spend_requires_operator` prose only | Yes | correctly not coded as a meter |
 | `/status` + `/lookback`; no `/promote` slash | Yes | |
 | Agent Skills + `$SKILL_DIR` scripts | Yes | |
-| Spec header “Not implemented” | **Stale** | m3 |
-| Hive-checkout intro “worktree” | **Stale vs option C** | m3 |
+| Spec header status line | Fixed | now records v0 implemented at `be0a66d` |
+| Hive-checkout intro | Fixed | states option C (nested clone); note kept as decision record |
 
 ---
 
@@ -153,7 +153,7 @@ Pillars A–E from the spec are present in code: Agent Skills packaging (`SKILL.
 
 ```text
 # environment
-$ git -C /home/box/src/rip-swarm status
+$ git -C <reviewer's checkout> status
 On branch master
 Your branch is up to date with 'origin/master'.
 nothing to commit, working tree clean
@@ -196,3 +196,24 @@ Two-clone race / union-merge / dirty-code isolation covered by existing `tests/t
 ## Reviewer note
 
 This review intentionally does **not** change implementation. Prior tip `be0a66d` already absorbed an earlier implementation-review fix pass (93 → 231 tests); findings above are residual relative to that tip and the v0.2 spec.
+
+---
+
+## Dispositions (2026-09-17)
+
+Every finding above was addressed in the pass that followed this review (implementation by the gitops/CLI and claim/status agents; docs, spec and schema by this pass). Nothing is deferred to a later version.
+
+| Finding | Disposition |
+|---------|-------------|
+| M1. `publish` commits every untracked path | **Fixed (this pass)** — publish stages only the allow-listed paths each operation writes; spec §8.5 reworded to "commit only the paths written (allow-listed per operation)". |
+| M2. Registry / budget enforcement is CLI-claim-only | **Fixed (this pass)** — the registry + harness gate moved to the claim primitive, so every lifecycle path is covered; spec §5 trust updated. |
+| M3. `try_claim("orchestrator")` can create baton SoT without CURRENT | **Fixed (this pass)** — the baton is acquired only through `claim_baton` (promote-only); `try_claim` refuses the reserved id. |
+| m1. Promote/claim trust CLI `--harness` over registry | **Fixed (this pass)** — `--harness` is optional and defaults to the registry value; a supplied mismatch exits 2. Spec §5/§11 and SKILL.md updated. |
+| m2. Tombstone crash window: active claim + complete tombstone coexist | **Fixed (this pass)** — status flags an active claim with a matching complete tombstone as corrupt instead of telling both stories. |
+| m3. Spec / checkout note describe pre-implementation or pre-option-C state | **Fixed (this pass)** — spec status line now records v0 implemented at `be0a66d` (231 tests) and points here; `docs/specs/2026-09-17-hive-checkout.md` states option C is locked and keeps the note as the decision record. |
+| m4. `message.schema.json` omits `ref` | **Fixed (this pass)** — `ref` added to properties and required (nullable `claim_id` / `task_id` / `in_reply_to`); `claim.schema.json` also gained the tombstone-only `result_ref`. All seven schemas re-checked against runtime output. |
+| m5. Claim path accepts non-ULID task ids if an inbox file is planted | **Fixed (this pass)** — the claim primitive shares the inbox id rules, with the `orchestrator` exception. |
+| n1. Undocumented `--local` on a publishable hive | **Fixed (this pass)** — helpers refuse `--local` on a hive with an upstream unless `RIP_SWARM_ALLOW_LOCAL=1`; documented in SKILL.md and spec §11. |
+| n2. Lookback heading "CURRENT vs last promote" | **Fixed (this pass)** — heading renamed to "CURRENT vs orchestrator claim" in `rip_swarm/lookback.py`, its test, spec §10 and the plan's Task 13. |
+
+Decision-log row for this pass: spec §13, dated 2026-09-17.

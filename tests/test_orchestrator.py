@@ -4,7 +4,8 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from rip_swarm.claim import ClaimDenied, complete, reject
+from rip_swarm.claim import ClaimDenied, complete, reject, try_claim
+from rip_swarm.registry import UnknownAgent
 from rip_swarm.io import atomic_write_json, read_json
 from rip_swarm.orchestrator import (
     current_matches_claim,
@@ -318,6 +319,47 @@ class TestOrchestrator(unittest.TestCase):
         state = orchestrator_state(self.hive, later)
         self.assertTrue(state["expired"])
         self.assertFalse(state["matches_claim"])
+
+    # --- M3/m1: promote is the only way to take the baton --------------------
+
+    def test_try_claim_cannot_take_the_baton(self):
+        with self.assertRaises(ClaimDenied) as ctx:
+            try_claim(self.hive, "orchestrator", "alice", "claude-code", T0, 1800)
+        self.assertIn("promote", str(ctx.exception))
+        self.assertFalse((self.hive / "claims" / "orchestrator.json").exists())
+        self.assertIsNone(read_current(self.hive))
+        self.assertTrue(current_matches_claim(self.hive, T0))
+
+    def test_promote_refuses_harness_not_in_registry(self):
+        with self.assertRaises(ClaimDenied) as ctx:
+            promote(
+                self.hive, agent="alice", harness="totally-wrong", now=T0,
+                lease_seconds=1800, reason="a", allow_self_promote=True, operators=[],
+            )
+        msg = str(ctx.exception)
+        self.assertIn("claude-code", msg)
+        self.assertIn("totally-wrong", msg)
+        self.assertFalse((self.hive / "claims" / "orchestrator.json").exists())
+        self.assertIsNone(read_current(self.hive))
+
+    def test_promote_harness_comes_from_registry(self):
+        cur = promote(
+            self.hive, agent="bob", harness="codex", now=T0,
+            lease_seconds=1800, reason="a", allow_self_promote=True, operators=[],
+        )
+        self.assertEqual(cur["harness"], "codex")
+        self.assertEqual(read_current(self.hive)["harness"], "codex")
+        self.assertEqual(
+            read_json(self.hive / "claims" / "orchestrator.json")["harness"], "codex"
+        )
+
+    def test_promote_refuses_unregistered_agent(self):
+        with self.assertRaises(UnknownAgent):
+            promote(
+                self.hive, agent="ghost", harness="codex", now=T0,
+                lease_seconds=1800, reason="a", allow_self_promote=True, operators=[],
+            )
+        self.assertFalse((self.hive / "claims" / "orchestrator.json").exists())
 
 if __name__ == "__main__":
     unittest.main()

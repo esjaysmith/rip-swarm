@@ -80,7 +80,7 @@ def _render(hive: Path, day: str, report: dict, cfg: dict) -> str:
     doubles = _double_claim_bullets(hive)
     _add_section(lines, "Double claims", doubles)
     _add_section(lines, "Expired leases", list(report["expired_claim_files"]))
-    _add_section(lines, "CURRENT vs last promote", _mismatch_bullets(report))
+    _add_section(lines, "CURRENT vs orchestrator claim", _mismatch_bullets(report))
     _add_section(lines, "Inbox with no claim", list(report["inbox_without_claim"]))
     _add_section(lines, "JSONL parse errors", _jsonl_bullets(report))
     _add_section(

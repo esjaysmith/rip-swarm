@@ -57,7 +57,22 @@ def _from_doc(task_id: str, path: Path, doc: dict, now: datetime) -> Holder | Ex
     )
 
 
+COMPLETE_COEXIST_ERROR = "active claim and complete tombstone coexist"
+
+
+def has_complete_tombstone(claims_dir: Path, task_id: str) -> bool:
+    """True when `<task_id>.complete.*.json` exists beside the active claim.
+
+    `_finalize` writes the tombstone and then unlinks the active path; a crash
+    between those two steps leaves both on disk. The task is neither held nor
+    cleanly settled, so callers report it as corrupt instead of picking one.
+    """
+    return any(claims_dir.glob(f"{task_id}.complete.*.json"))
+
+
 def _fold_path(task_id: str, path: Path, now: datetime) -> Holder | Expired | Corrupt:
+    if has_complete_tombstone(path.parent, task_id):
+        return Corrupt(task_id=task_id, path=path, error=COMPLETE_COEXIST_ERROR)
     try:
         doc = read_json(path)
     except (OSError, ValueError, json.JSONDecodeError) as e:

@@ -12,6 +12,7 @@
     "exclusive": {"type": "boolean", "const": true},
     "created_at": {"type": "string", "pattern": "Z$"},
     "expires_at": {"type": "string", "pattern": "Z$"},
-    "note": {"type": ["string", "null"]}
+    "note": {"type": ["string", "null"]},
+    "result_ref": {"type": ["string", "null"]}
   }
 }

@@ -20,6 +20,8 @@ Git hive is the board. Claims are create-only files; the first push wins. JSONL 
 
 Each project keeps its hive on a dedicated **`swarm` branch** of the project repo, cloned single-branch into `./_swarm` (gitignored on code branches) and pushed to the project’s normal remote as `origin/swarm`. `RIP_SWARM_HIVE` or `--hive` override the path; default is `./_swarm`. Never treat chat as durable coordination.
 
+`--local` skips fetch/commit/push and is test-only: on a hive that has an upstream the helpers refuse it unless you set `RIP_SWARM_ALLOW_LOCAL=1`, because the uncommitted result blocks every later publish.
+
 ## Init
 
 ```bash
@@ -43,10 +45,12 @@ Writes `inbox/<task_id>.json` and publishes it, so other harnesses can claim it.
 ## Claim a task
 
 ```bash
-python "$SKILL_DIR/scripts/claim.py" --hive "$RIP_SWARM_HIVE" --task TASK_ID --agent AGENT --harness HARNESS
+python "$SKILL_DIR/scripts/claim.py" --hive "$RIP_SWARM_HIVE" --task TASK_ID --agent AGENT
 ```
 
 Do not edit the project until this command exits 0 (push accepted). Exit code 2 means lost race: pick other work. Heartbeat at or before half the lease with `claim.py heartbeat …`; finish with `claim.py complete --result-ref PATH`.
+
+`--harness` is optional: left off, it is read from the agent's `agents/registry.yaml` entry. Pass it only to assert the value — if it does not match the registry the command exits 2.
 
 Hand a claim back instead of finishing it:
 
@@ -60,10 +64,10 @@ python "$SKILL_DIR/scripts/claim.py" reject  --hive "$RIP_SWARM_HIVE" --task TAS
 ## Promote
 
 ```bash
-python "$SKILL_DIR/scripts/promote.py" --hive "$RIP_SWARM_HIVE" --agent AGENT --harness HARNESS --by OPERATOR_ID --reason "operator designated"
+python "$SKILL_DIR/scripts/promote.py" --hive "$RIP_SWARM_HIVE" --agent AGENT --by OPERATOR_ID --reason "operator designated"
 ```
 
-`--by` defaults to `--agent`; self-promotion needs `allow_self_promote: true` in the profile.
+`--by` defaults to `--agent`; self-promotion needs `allow_self_promote: true` in the profile. `--harness` is optional here too and defaults to the registry value.
 
 ## Status / lookback
 

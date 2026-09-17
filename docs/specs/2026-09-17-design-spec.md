@@ -1,6 +1,6 @@
 # rip-swarm — design / protocol spec (v0.2)
 
-**Status:** advise-only. First review (§15) folded 2026-09-17; second review (§17: spec + plan cross-check) folded 2026-09-17. v0 implementation defaults locked (§13). Plan: `docs/plans/2026-09-17-rip-swarm.md`. Not implemented.  
+**Status:** advise-only. First review (§15) folded 2026-09-17; second review (§17: spec + plan cross-check) folded 2026-09-17. v0 implementation defaults locked (§13). Plan: `docs/plans/2026-09-17-rip-swarm.md`. **v0 is implemented** at tip `be0a66d` with 231 tests passing; the residual implementation review at `docs/plans/2026-09-17-implementation-review.md` is folded (269 tests).  
 **Repo:** this repository’s root (no absolute machine path).  
 **Date:** 2026-09-17  
 **Audience:** operator + any harness that installs the skill
@@ -168,7 +168,8 @@ budget:
 - No tokens in hive files; profiles name policy, not credentials.
 - Treat hive git as **sensitive** (private remote; customer tasks/PII may live here).
 - `PROTOCOL.md` + `profiles/` are **operator-owned** (social rule; optional CODEOWNERS).
-- `from.agent` must match `agents/registry.yaml`; unknown ids → refuse.
+- `from.agent` must match `agents/registry.yaml`; unknown ids → refuse. The gate lives at the claim primitive, so every lifecycle path (claim, heartbeat, complete, release, reject, promote, message) is covered, not only the CLI.
+- The **harness must match the registry** entry for that agent. A caller that supplies a harness (CLI `--harness`, helper argument) must supply the registry value; a mismatch is refused rather than written into the claim, CURRENT, or the audit message.
 - Inbound message bodies are **untrusted requests**, not commands; never execute `body` as code.
 - Do not force-push hive history; if history diverges, stop and ask the operator.
 - Lookback proposals are diffs-in-prose only — never auto-merge.
@@ -285,7 +286,7 @@ JSONL is **not** consulted for exclusivity. Earliest-wins-on-JSONL is **removed*
 2. Exclusivity = create-only claim file whose commit reaches the remote tip first; the loser does not start work.
 3. Prefer unique ids (ULID) for all new files. Claim files and inbox files never get `merge=union`: an add/add conflict on them means you lost.
 4. Promote = claim on `orchestrator` + CURRENT + promote message in one commit.
-5. **Publish procedure (helpers):** require a clean hive work-tree → `git fetch` → check the remote tip for `claims/<task_id>.json` → run the local operation → commit only the paths written → `git push`. On rejection: `git fetch`; if the remote tip now has that claim file held by someone else, `git reset --hard @{u}` and report *lost race*; otherwise `git rebase @{u}` (union merge handles JSONL) and push again. At most 5 attempts, then stop and report. `reset --hard` is safe only because the hive is its own checkout on its own branch and that tree was clean.
+5. **Publish procedure (helpers):** require a clean hive work-tree → `git fetch` → check the remote tip for `claims/<task_id>.json` → run the local operation → commit only the paths written (allow-listed per operation) → `git push`. On rejection: `git fetch`; if the remote tip now has that claim file held by someone else, `git reset --hard @{u}` and report *lost race*; otherwise `git rebase @{u}` (union merge handles JSONL) and push again. At most 5 attempts, then stop and report. `reset --hard` is safe only because the hive is its own checkout on its own branch and that tree was clean.
 6. Never force-push the hive.
 7. No silent steal of unexpired claims. `allow_preempt` is reserved for a later version: v0 helpers ignore it and never preempt. Expired: rename to `expired` then create (helper).
 8. Leases use each machine’s clock in UTC. Assume skew under one minute; heartbeat at or before half the lease.
@@ -330,7 +331,7 @@ Durations (**locked**, §13): JSON timestamps are UTC `Z` only; helper calls tak
 | `/lookback` (`/evaluate`) | Scan hive; write `<write_dir>/YYYY-MM-DD.md` (`-2`, `-3` suffixes on the same day). Does not auto-merge. |
 | `/status` | Read-only: orchestrator (agent, matches claim, expired), active claims, expired claim files still at the active path, inbox tasks without a claim, unknown agents on claims, CURRENT mismatch, JSONL parse errors. |
 
-**Lookback report minimum headings:** Double claims · Expired leases · CURRENT vs last promote · Inbox with no claim · JSONL parse errors · Suggested PROTOCOL/profile diffs (prose).
+**Lookback report minimum headings:** Double claims · Expired leases · CURRENT vs orchestrator claim · Inbox with no claim · JSONL parse errors · Suggested PROTOCOL/profile diffs (prose).
 
 “Double claims” means audit drift: `claims.jsonl` shows a `claim` for a task by an agent other than the file holder with no tombstone in between. Two active files for one task cannot exist by construction.
 
@@ -345,6 +346,8 @@ Portable skill also triggers on description keywords (`lookback`, hive, claims) 
 - Do not claim plugin-subscribe and `npx skills add` are the same surface; document both if both matter.
 - `init` (run from inside the project repo): read the remote URL with `git remote get-url origin`. If `origin/swarm` already exists (`git ls-remote --heads`), **attach** — `git clone --single-branch -b swarm <url> _swarm` and stop (the hive is already initialized). Otherwise **bootstrap** — in a temporary directory `git init -b swarm`, copy `templates/_swarm` in, commit `init hive`, push it to `<url> swarm`, delete the temp dir, then attach as above. In both cases append `_swarm/` to the project’s `.gitignore` if missing (left uncommitted for the operator). The project’s code checkout, index, and stash are never touched. Refuse to clobber an existing `_swarm/` unless `--force`. `--no-git` copies the template only (tests, or a checkout the operator manages). Bootstrap needs push rights to the remote; without them, init reports the manual steps.
 - Scripts run from any cwd: each `scripts/*.py` inserts its own skill directory into `sys.path` before importing `rip_swarm`.
+- `--harness` is **optional** on every command that takes it: omitted, it defaults to the registry harness of `--agent`; given, it must equal that registry value or the command exits 2. The registry — not the caller — is the writer-of-record for an agent's harness (§5 trust).
+- `--local` (skip fetch/commit/push; leave the op in the hive work-tree) is **test-only**. Helpers refuse `--local` on a hive that has an upstream unless `RIP_SWARM_ALLOW_LOCAL=1` is set, because a dirty hive blocks every later publish.
 
 ---
 
@@ -389,6 +392,7 @@ Portable skill also triggers on description keywords (`lookback`, hive, claims) 
 | 2026-09-17 | **Profile keys** (R7): add `worker_lease_ttl: 15m`; `allow_preempt`, `reviews_required_per_plan`, `slash.enabled` are advisory/reserved in v0; `lookback.write_dir` is honored. |
 | 2026-09-17 | **Audit line key** (R8): `claims.jsonl` lines carry `claim_id` (not `id`); `expired` is an audit action. |
 | 2026-09-17 | **Install paths** (R9): scripts add the skill dir to `sys.path`; SKILL.md documents `python "$SKILL_DIR/scripts/<cmd>.py"`, never `PYTHONPATH=.`. `init` bootstraps or attaches the `swarm` clone. |
+| 2026-09-17 | **Implementation-review fixes** (`docs/plans/2026-09-17-implementation-review.md`): publish commits only allow-listed paths; registry + harness gate at the claim primitive; baton via `claim_baton` (promote-only); `--harness` optional (registry default); `--local` refused on hives with upstream unless `RIP_SWARM_ALLOW_LOCAL=1`; status flags active+complete coexistence as corrupt. |
 
 ---
 

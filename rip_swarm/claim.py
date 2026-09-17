@@ -7,6 +7,7 @@ from pathlib import Path
 
 from rip_swarm.audit import append_claim_audit
 from rip_swarm.ids import new_claim_id
+from rip_swarm.inbox import InboxError, validate_task_id
 from rip_swarm.io import (
     ExclExistsError,
     atomic_write_json,
@@ -15,6 +16,7 @@ from rip_swarm.io import (
     write_json_to_new_path,
 )
 from rip_swarm.paths import HivePaths
+from rip_swarm.registry import require_agent
 from rip_swarm.timeutil import add_seconds, format_z, parse_z
 
 
@@ -73,8 +75,10 @@ def tombstone_claim(path: Path, action: str, now: datetime) -> Path:
 
 def _finalize(path: Path, doc: dict, action: str, now: datetime) -> Path:
     """Write the final body straight to a fresh tombstone, then drop the active
-    path. The active path never carries result_ref, so a crash can only leave
-    the task looking held (recoverable) or done (correct) - never both."""
+    path. The active path never carries result_ref, so it is never mistaken for
+    a finished claim. A crash between the two steps leaves the active file and
+    its tombstone side by side; fold/status report that pair as corrupt
+    ("active claim and complete tombstone coexist") rather than as a holder."""
     for dest in _tombstone_candidates(path, action, now):
         if write_json_to_new_path(dest, doc):
             path.unlink(missing_ok=True)
@@ -93,6 +97,31 @@ def _check_task_id(task_id: str) -> str:
     return task_id
 
 
+def _check_claimable_task_id(task_id: str) -> str:
+    """A claimable lock name is exactly an inbox task id: `task_<ULID>`.
+
+    The unsafe-id check keeps planted paths from escaping claims/; this adds
+    the inbox's own rule so a planted `inbox/weird-task.json` is not claimable.
+    """
+    _check_task_id(task_id)
+    try:
+        return validate_task_id(task_id)
+    except InboxError as e:
+        raise ClaimDenied(str(e)) from e
+
+
+def _require_registered(hive: Path, agent: str, harness: str | None = None) -> dict:
+    """Registry gate for every claim primitive: unknown ids are refused before
+    any file is touched, and a supplied harness must match the registry entry
+    (registry.yaml is the SoT for who an agent is, per spec section 5)."""
+    rec = require_agent(hive, agent)
+    if harness is not None and rec["harness"] != harness:
+        raise ClaimDenied(
+            f"harness mismatch for {agent}: registry says {rec['harness']!r}, got {harness!r}"
+        )
+    return rec
+
+
 def _read_active(hive: Path, task_id: str) -> tuple[Path, dict] | None:
     path = HivePaths(hive).claim(task_id)
     if not path.exists():
@@ -109,10 +138,41 @@ def try_claim(
     lease_seconds: int,
     note: str | None = None,
 ) -> dict:
-    _check_task_id(task_id)
-    paths = HivePaths(hive)
-    if task_id != "orchestrator" and not paths.inbox_task(task_id).exists():
+    """Claim a task. The orchestrator baton is not a task: it is acquired with
+    promote (claim + CURRENT mirror + audit in one commit), never here."""
+    if task_id == "orchestrator":
+        raise ClaimDenied("orchestrator baton is acquired with promote, not claim")
+    _check_claimable_task_id(task_id)
+    _require_registered(hive, agent, harness)
+    if not HivePaths(hive).inbox_task(task_id).exists():
         raise ClaimDenied(f"no inbox task {task_id}")
+    return _create_claim(hive, task_id, agent, harness, now, lease_seconds, note)
+
+
+def claim_baton(
+    hive: Path,
+    agent: str,
+    harness: str,
+    now: datetime,
+    lease_seconds: int,
+    note: str | None = None,
+) -> dict:
+    """Acquire the `orchestrator` pseudo-task claim. Promote-only entry point:
+    orchestrator.promote pairs this with CURRENT.json in the same commit."""
+    _require_registered(hive, agent, harness)
+    return _create_claim(hive, "orchestrator", agent, harness, now, lease_seconds, note)
+
+
+def _create_claim(
+    hive: Path,
+    task_id: str,
+    agent: str,
+    harness: str,
+    now: datetime,
+    lease_seconds: int,
+    note: str | None = None,
+) -> dict:
+    paths = HivePaths(hive)
     active = _read_active(hive, task_id)
     if active:
         path, doc = active
@@ -145,6 +205,7 @@ def try_claim(
 
 
 def _require_holder(hive: Path, task_id: str, agent: str, now: datetime) -> tuple[Path, dict]:
+    _require_registered(hive, agent)
     active = _read_active(hive, task_id)
     if not active:
         raise ClaimDenied(f"no active claim for {task_id}")
