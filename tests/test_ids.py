@@ -20,6 +20,10 @@ class TestIds(unittest.TestCase):
         self.assertTrue(new_msg_id().startswith("msg_"))
         self.assertEqual(len(new_task_id()), 5 + 26)
 
+    def test_naive_datetime_rejected(self):
+        with self.assertRaises(ValueError):
+            new_ulid(datetime(2026, 9, 17, 9, 0, 0))
+
 
 if __name__ == "__main__":
     unittest.main()

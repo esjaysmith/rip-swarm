@@ -16,13 +16,38 @@ def load_yaml(text: str) -> Any:
 def _lines(text: str) -> list[tuple[int, str]]:
     out: list[tuple[int, str]] = []
     for line in text.splitlines():
-        if not line.strip():
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if stripped[:1] == "\t" or "\t" in line[:indent]:
+            raise ValueError("YAML indent must use spaces, not tabs")
+        if not stripped.strip():
             continue
-        indent = len(line) - len(line.lstrip(" "))
+        if stripped.startswith("#"):
+            continue
+        content = _strip_comment(stripped).rstrip()
+        if not content:
+            continue
         if indent % 2:
             raise ValueError("YAML indent must be a multiple of 2")
-        out.append((indent, line[indent:].rstrip()))
+        out.append((indent, content))
     return out
+
+
+def _strip_comment(content: str) -> str:
+    """Drop a trailing ` #...` comment. A hash inside quotes, or one not
+    preceded by whitespace (`a#b`), is literal text."""
+    quote: str | None = None
+    for i, ch in enumerate(content):
+        if quote is not None:
+            if ch == quote:
+                quote = None
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            continue
+        if ch == "#" and (i == 0 or content[i - 1] in " \t"):
+            return content[:i]
+    return content
 
 
 def _parse(lines: list[tuple[int, str]], i: int, indent: int) -> tuple[Any, int]:
@@ -67,14 +92,14 @@ def _parse_list(lines: list[tuple[int, str]], i: int, indent: int) -> tuple[list
             raise ValueError("bad YAML indent")
         if not (content.startswith("- ") or content == "-"):
             break
-        rest = "" if content == "-" else content[2:]
+        rest = "" if content == "-" else content[2:].strip()
         i += 1
         if rest == "":
             if i < n and lines[i][0] > indent:
                 val, i = _parse(lines, i, lines[i][0])
             else:
                 val = None
-        elif ":" in rest:
+        elif ":" in rest and not _is_quoted(rest):
             map_indent = indent + 2
             chunk = [(map_indent, rest)]
             while i < n and lines[i][0] > indent:
@@ -109,7 +134,14 @@ def _parse_flow(text: str) -> list:
     return [_parse_scalar(part.strip()) for part in inner.split(",")]
 
 
+def _is_quoted(text: str) -> bool:
+    return len(text) >= 2 and text[0] in ("'", '"') and text[-1] == text[0]
+
+
 def _parse_scalar(text: str) -> Any:
+    if _is_quoted(text):
+        # Quoted scalars are verbatim strings: never coerced to bool/int/null.
+        return text[1:-1]
     if text == "true":
         return True
     if text == "false":

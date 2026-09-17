@@ -1,12 +1,19 @@
 # rip_swarm/claim.py
 from __future__ import annotations
 
+import os
 from datetime import datetime
 from pathlib import Path
 
 from rip_swarm.audit import append_claim_audit
 from rip_swarm.ids import new_claim_id
-from rip_swarm.io import ExclExistsError, atomic_write_json, excl_create_json, read_json
+from rip_swarm.io import (
+    ExclExistsError,
+    atomic_write_json,
+    excl_create_json,
+    read_json,
+    write_json_to_new_path,
+)
 from rip_swarm.paths import HivePaths
 from rip_swarm.timeutil import add_seconds, format_z, parse_z
 
@@ -24,13 +31,66 @@ class ClaimDenied(ClaimError):
 
 
 def _stamp(now: datetime) -> str:
-    return now.strftime("%Y%m%dT%H%M%SZ")
+    """UTC wall clock, compact. format_z guarantees the tz conversion."""
+    return format_z(now).replace("-", "").replace(":", "")
+
+
+def _tombstone_candidates(path: Path, action: str, now: datetime):
+    """Yield collision-free tombstone paths: base, then base-2, base-3, ..."""
+    base = f"{path.stem}.{action}.{_stamp(now)}"
+    yield path.with_name(f"{base}.json")
+    n = 2
+    while True:
+        yield path.with_name(f"{base}-{n}.json")
+        n += 1
+
+
+def _free_tombstone(path: Path, action: str, now: datetime) -> Path:
+    for dest in _tombstone_candidates(path, action, now):
+        if not dest.exists():
+            return dest
+    raise ClaimError("unreachable")
 
 
 def tombstone_claim(path: Path, action: str, now: datetime) -> Path:
-    dest = path.with_name(f"{path.stem}.{action}.{_stamp(now)}.json")
-    path.rename(dest)
-    return dest
+    """Rename the active claim aside, never clobbering an existing tombstone."""
+    for dest in _tombstone_candidates(path, action, now):
+        try:
+            # os.link + unlink is the only portable never-overwrite rename.
+            os.link(str(path), str(dest))
+        except FileExistsError:
+            continue
+        except OSError:
+            if dest.exists():
+                continue
+            dest = _free_tombstone(path, action, now)
+            path.rename(dest)
+            return dest
+        path.unlink()
+        return dest
+    raise ClaimError("unreachable")
+
+
+def _finalize(path: Path, doc: dict, action: str, now: datetime) -> Path:
+    """Write the final body straight to a fresh tombstone, then drop the active
+    path. The active path never carries result_ref, so a crash can only leave
+    the task looking held (recoverable) or done (correct) - never both."""
+    for dest in _tombstone_candidates(path, action, now):
+        if write_json_to_new_path(dest, doc):
+            path.unlink(missing_ok=True)
+            return dest
+    raise ClaimError("unreachable")
+
+
+_UNSAFE_ID = ("/", "\\", "..")
+
+
+def _check_task_id(task_id: str) -> str:
+    if not isinstance(task_id, str) or not task_id:
+        raise ClaimDenied(f"unsafe task id {task_id!r}")
+    if task_id.startswith(".") or any(bad in task_id for bad in _UNSAFE_ID):
+        raise ClaimDenied(f"unsafe task id {task_id!r}")
+    return task_id
 
 
 def _read_active(hive: Path, task_id: str) -> tuple[Path, dict] | None:
@@ -49,6 +109,7 @@ def try_claim(
     lease_seconds: int,
     note: str | None = None,
 ) -> dict:
+    _check_task_id(task_id)
     paths = HivePaths(hive)
     if task_id != "orchestrator" and not paths.inbox_task(task_id).exists():
         raise ClaimDenied(f"no inbox task {task_id}")
@@ -60,7 +121,10 @@ def try_claim(
             if doc["agent"] == agent:
                 return doc
             raise ClaimDenied(f"held by {doc['agent']} until {doc['expires_at']}")
-        tombstone_claim(path, "expired", now)
+        try:
+            tombstone_claim(path, "expired", now)
+        except FileNotFoundError as e:
+            raise ClaimDenied("lost race stealing expired claim") from e
         append_claim_audit(hive, action="expired", claim_doc=doc, now=now)
     body = {
         "task_id": task_id,
@@ -118,19 +182,17 @@ def complete(
     doc["result_ref"] = result_ref.strip()
     if note is not None:
         doc["note"] = note
-    atomic_write_json(path, doc)
-    tombstone_claim(path, "complete", now)
+    _finalize(path, doc, "complete", now)
     append_claim_audit(hive, action="complete", claim_doc=doc, now=now, result_ref=doc["result_ref"])
     return doc
 
 
 def release(hive: Path, task_id: str, agent: str, now: datetime, note: str | None = None) -> dict:
     path, doc = _require_holder(hive, task_id, agent, now)
+    doc = dict(doc)
     if note is not None:
-        doc = dict(doc)
         doc["note"] = note
-        atomic_write_json(path, doc)
-    tombstone_claim(path, "release", now)
+    _finalize(path, doc, "release", now)
     append_claim_audit(hive, action="release", claim_doc=doc, now=now)
     return doc
 
@@ -139,10 +201,9 @@ def reject(hive: Path, task_id: str, agent: str, now: datetime, note: str | None
     if task_id == "orchestrator":
         raise ClaimDenied("orchestrator cannot be rejected; use release")
     path, doc = _require_holder(hive, task_id, agent, now)
+    doc = dict(doc)
     if note is not None:
-        doc = dict(doc)
         doc["note"] = note
-        atomic_write_json(path, doc)
-    tombstone_claim(path, "reject", now)
+    _finalize(path, doc, "reject", now)
     append_claim_audit(hive, action="reject", claim_doc=doc, now=now)
     return doc

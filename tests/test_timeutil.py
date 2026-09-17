@@ -23,6 +23,32 @@ class TestTimeutil(unittest.TestCase):
         self.assertEqual(parse_duration("1h"), 3600)
         self.assertEqual(parse_duration("45s"), 45)
 
+    def test_parse_z_rejects_trailing_newline(self):
+        with self.assertRaises(ValueError):
+            parse_z("2026-09-17T09:01:00Z\n")
+
+    def test_parse_duration_rejects_trailing_newline(self):
+        with self.assertRaises(ValueError):
+            parse_duration("30m\n")
+
+    def test_parse_duration_rejects_bool(self):
+        with self.assertRaises(ValueError):
+            parse_duration(True)
+        with self.assertRaises(ValueError):
+            parse_duration(False)
+
+    def test_parse_duration_rejects_zero(self):
+        with self.assertRaises(ValueError):
+            parse_duration(0)
+        with self.assertRaises(ValueError):
+            parse_duration("0")
+        with self.assertRaises(ValueError):
+            parse_duration("0s")
+
+    def test_parse_duration_rejects_negative(self):
+        with self.assertRaises(ValueError):
+            parse_duration(-1)
+
 
 if __name__ == "__main__":
     unittest.main()

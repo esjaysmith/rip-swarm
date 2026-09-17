@@ -1,6 +1,7 @@
 # rip_swarm/inbox.py
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +13,19 @@ from rip_swarm.timeutil import format_z, now_utc
 
 class InboxError(ValueError):
     pass
+
+
+_TASK_ID = re.compile(r"task_[0-9A-HJKMNP-TV-Z]{26}")
+_RESERVED = frozenset({"orchestrator", "CURRENT", "registry", "default"})
+
+
+def validate_task_id(task_id: str) -> str:
+    """Accept only a canonical `task_<ULID>` id; reject reserved literals."""
+    if not isinstance(task_id, str) or not _TASK_ID.fullmatch(task_id):
+        raise InboxError(f"invalid task_id {task_id!r}")
+    if task_id in _RESERVED:
+        raise InboxError(f"reserved task_id {task_id!r}")
+    return task_id
 
 
 def create_task(
@@ -29,7 +43,7 @@ def create_task(
     if not created_by.strip():
         raise InboxError("created_by is required")
     ts = now or now_utc()
-    tid = task_id or new_task_id(ts)
+    tid = validate_task_id(task_id) if task_id is not None else new_task_id(ts)
     doc = {
         "id": tid,
         "title": title,

@@ -137,14 +137,28 @@ def _untracked_relpaths(hive: Path) -> list[str]:
 
 
 def _drop_untracked(hive: Path) -> None:
+    """Remove untracked paths a failed op left behind, without following symlinks.
+
+    Containment is decided on the *parent* directory, so a symlink whose target lives
+    outside the hive is still dropped (resolving the link itself would place it outside
+    the hive and leave it behind forever, keeping the hive permanently DirtyHive).
+    Symlinks are unlinked before any is_file / is_dir test, so the link is removed and
+    whatever it points at -- e.g. a file in the project checkout -- is never touched.
+    """
     hive = hive.resolve()
     for rel in _untracked_relpaths(hive):
-        path = (hive / rel).resolve()
+        raw = hive / rel.rstrip("/")
+        try:
+            path = raw.parent.resolve() / raw.name
+        except OSError:
+            continue
         try:
             path.relative_to(hive)
         except ValueError:
             continue
-        if path.is_symlink() or path.is_file():
+        if path.is_symlink():
+            path.unlink()
+        elif path.is_file():
             path.unlink()
         elif path.is_dir():
             shutil.rmtree(path)
@@ -156,40 +170,62 @@ def _reset_upstream(hive: Path) -> None:
     _drop_untracked(hive)
 
 
-def _read_remote_claim(hive: Path, task_id: str) -> dict | None:
+class _UnreadableClaim:
+    """Sentinel: a claim file exists on the remote tip but cannot be parsed.
+
+    Fail closed -- an unparseable claim is treated as held by someone else, so a
+    corrupt remote tip denies the claim instead of crashing every publish.
+    """
+
+    __slots__ = ()
+
+
+UNREADABLE_CLAIM = _UnreadableClaim()
+
+
+def _read_remote_claim(hive: Path, task_id: str) -> dict | _UnreadableClaim | None:
     if task_id == "__none__":
         return None
     up = upstream(hive)
     result = _run(hive, "show", f"{up}:claims/{task_id}.json", check=False)
     if result.returncode != 0:
         return None
-    data = json.loads(result.stdout)
+    try:
+        data = json.loads(result.stdout)
+    except (ValueError, UnicodeDecodeError):
+        return UNREADABLE_CLAIM
     if not isinstance(data, dict):
-        return None
+        return UNREADABLE_CLAIM
     return data
+
+
+def _deny_if_unreadable(doc: object, task_id: str) -> None:
+    if isinstance(doc, _UnreadableClaim):
+        raise ClaimDenied(f"unreadable claim on remote tip for {task_id}")
 
 
 def remote_claim(hive: Path, task_id: str) -> dict | None:
     _fetch(hive)
-    return _read_remote_claim(hive, task_id)
+    doc = _read_remote_claim(hive, task_id)
+    return doc if isinstance(doc, dict) else None
 
 
-def _holder(doc: dict | None) -> str | None:
-    if not doc:
+def _holder(doc: object) -> str | None:
+    if not isinstance(doc, dict) or not doc:
         return None
     agent = doc.get("agent")
     return agent if isinstance(agent, str) else None
 
 
-def _held_by_other(doc: dict | None, ours: str | None) -> bool:
+def _held_by_other(doc: object, ours: str | None) -> bool:
     holder = _holder(doc)
     return holder is not None and ours is not None and holder != ours
 
 
 def _unexpired_held_by_other(
-    doc: dict | None, ours: str | None, now: datetime | None
+    doc: object, ours: str | None, now: datetime | None
 ) -> bool:
-    if not _held_by_other(doc, ours) or doc is None:
+    if not _held_by_other(doc, ours) or not isinstance(doc, dict):
         return False
     if now is None:
         return True
@@ -217,12 +253,28 @@ def _commit_op(hive: Path, message: str) -> None:
     _run(hive, "commit", "-m", message)
 
 
+def _rebase_conflicts_claim(hive: Path, task_id: str) -> bool:
+    """True when the in-progress rebase is conflicted on `claims/<task_id>.json`.
+
+    An add/add or content conflict on a claim file means someone else's claim reached
+    the remote tip first (§8.3: claim files never union-merge, a conflict means you
+    lost), so the caller converts it into ClaimDenied rather than a generic error.
+    """
+    if task_id == "__none__":
+        return False
+    result = _run(hive, "diff", "--name-only", "--diff-filter=U", "-z", check=False)
+    if result.returncode != 0:
+        return False
+    names = [n for n in result.stdout.split("\0") if n]
+    return f"claims/{task_id}.json" in names
+
+
 def _push_with_retries(
     hive: Path,
     *,
     task_id: str,
-    agent: str | None,
-    now: datetime | None,
+    agent: str,
+    now: datetime,
     max_attempts: int,
 ) -> None:
     for attempt in range(max_attempts):
@@ -230,7 +282,11 @@ def _push_with_retries(
         if pushed.returncode == 0:
             return
         _fetch(hive)
-        if _unexpired_held_by_other(_read_remote_claim(hive, task_id), agent, now):
+        remote = _read_remote_claim(hive, task_id)
+        if isinstance(remote, _UnreadableClaim):
+            _reset_upstream(hive)
+            raise ClaimDenied(f"unreadable claim on remote tip for {task_id}")
+        if _unexpired_held_by_other(remote, agent, now):
             _reset_upstream(hive)
             raise ClaimDenied("lost race on remote tip")
         if attempt >= max_attempts - 1:
@@ -238,8 +294,11 @@ def _push_with_retries(
             raise GitopsError("push rejected after max attempts")
         rebased = _run(hive, "rebase", "@{u}", check=False)
         if rebased.returncode != 0:
+            lost = _rebase_conflicts_claim(hive, task_id)
             _run(hive, "rebase", "--abort", check=False)
             _reset_upstream(hive)
+            if lost:
+                raise ClaimDenied("lost race on remote tip")
             raise GitopsError("rebase onto upstream failed")
     _reset_upstream(hive)
     raise GitopsError("push rejected after max attempts")
@@ -251,10 +310,26 @@ def publish(
     task_id: str,
     op: Callable[[], dict],
     message: str,
+    agent: str,
+    now: datetime,
     max_attempts: int = 5,
-    agent: str | None = None,
-    now: datetime | None = None,
 ) -> dict:
+    """Run `op` in the hive and push the resulting commit (§8.5).
+
+    `agent` and `now` are required: without them the remote-tip check cannot tell our
+    own claim from a foreign one, nor a live lease from an expired one, so the race
+    protection silently degrades and a lost race surfaces as a rebase failure.
+
+    Unpushed local commits (rule): publish never `reset --hard`s over a commit the
+    remote does not have. When HEAD is ahead of `@{u}` publish refuses without
+    touching history -- ClaimDenied("lost race on remote tip") if the remote tip
+    carries an *unexpired foreign* claim on `task_id` (expiry-aware, so an expired
+    foreign claim stays stealable), ClaimDenied("unreadable claim ...") if that claim
+    is corrupt, and otherwise GitopsError("unpushed hive commits; push or discard
+    before publish"). Either way HEAD is unchanged and the operator decides whether to
+    push or discard. `reset --hard` remains in use only on paths where every local
+    commit is already on the remote.
+    """
     hive = hive.resolve()
     assert_hive_repo(hive)
     assert_clean(hive)
@@ -262,13 +337,18 @@ def publish(
 
     if _out(hive, "rev-list", "@{u}..HEAD"):
         _fetch(hive)
-        if _held_by_other(_read_remote_claim(hive, task_id), agent):
-            _reset_upstream(hive)
+        remote = _read_remote_claim(hive, task_id)
+        _deny_if_unreadable(remote, task_id)
+        if _unexpired_held_by_other(remote, agent, now):
             raise ClaimDenied("lost race on remote tip")
         raise GitopsError("unpushed hive commits; push or discard before publish")
 
     _fetch(hive)
-    if _unexpired_held_by_other(_read_remote_claim(hive, task_id), agent, now):
+    remote = _read_remote_claim(hive, task_id)
+    if isinstance(remote, _UnreadableClaim):
+        _reset_upstream(hive)
+        raise ClaimDenied(f"unreadable claim on remote tip for {task_id}")
+    if _unexpired_held_by_other(remote, agent, now):
         _reset_upstream(hive)
         raise ClaimDenied("lost race on remote tip")
 

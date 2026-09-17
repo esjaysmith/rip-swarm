@@ -19,6 +19,8 @@ def _encode(n: int, length: int) -> str:
 def new_ulid(now: datetime | None = None) -> str:
     if now is None:
         now = datetime.now(timezone.utc)
+    if now.tzinfo is None or now.tzinfo.utcoffset(now) is None:
+        raise ValueError("datetime must be timezone-aware")
     ms = int(now.timestamp() * 1000)
     if ms < 0 or ms >= (1 << 48):
         raise ValueError("time out of ULID range")

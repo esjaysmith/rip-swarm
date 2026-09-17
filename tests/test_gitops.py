@@ -99,14 +99,23 @@ class TestGitops(unittest.TestCase):
             self.ha, task_id=self.task["id"], agent="alice", harness="claude-code",
             now=T0, lease_seconds=900,
         )
-        # B now has an unpushed local commit. publish sees HEAD ahead of @{u}, fetches, finds alice's
-        # claim on the remote tip, resets B's hive to the remote tip and reports the lost race.
+        # B now has an unpushed local commit. publish sees HEAD ahead of @{u}, fetches, finds
+        # alice's unexpired claim on the remote tip and reports the lost race -- without
+        # resetting, so B's unpushed commit survives for the operator to push or discard.
+        head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.hb, text=True).strip()
         with self.assertRaises(ClaimDenied):
             claim_and_publish(
                 self.hb, task_id=self.task["id"], agent="bob", harness="codex",
                 now=T0, lease_seconds=900,
             )
-        self.assertEqual(read_json(self.hb / "claims" / f"{self.task['id']}.json")["agent"], "alice")
+        self.assertEqual(
+            subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=self.hb, text=True).strip(),
+            head,
+        )
+        self.assertEqual(read_json(self.hb / "claims" / f"{self.task['id']}.json")["agent"], "bob")
+        self.assertEqual(
+            read_json(self.ha / "claims" / f"{self.task['id']}.json")["agent"], "alice"
+        )
 
     def test_dirty_code_tree_neither_blocks_nor_is_touched(self):
         # The agent is mid-edit on the code branch; hive publish must still work, and a lost race
@@ -128,7 +137,8 @@ class TestGitops(unittest.TestCase):
         (self.a / "app.py").write_text("dirty\n", encoding="utf-8")
         from rip_swarm.claim import heartbeat
         publish(self.ha, task_id=self.task["id"], message="heartbeat",
-                op=lambda: heartbeat(self.ha, self.task["id"], "alice", T0, 900))
+                op=lambda: heartbeat(self.ha, self.task["id"], "alice", T0, 900),
+                agent="alice", now=T0)
 
     def test_concurrent_audit_appends_union_merge(self):
         # Both hives append to messages.jsonl; second push must rebase cleanly via merge=union.
@@ -136,8 +146,8 @@ class TestGitops(unittest.TestCase):
             return write_message(self.ha, agent="alice", harness="claude-code", type="ops", to="*", body={"text": "a"}, now=T0)
         def op_b():
             return write_message(self.hb, agent="bob", harness="codex", type="ops", to="*", body={"text": "b"}, now=T0)
-        publish(self.ha, task_id="__none__", op=op_a, message="msg a")
-        publish(self.hb, task_id="__none__", op=op_b, message="msg b")
+        publish(self.ha, task_id="__none__", op=op_a, message="msg a", agent="alice", now=T0)
+        publish(self.hb, task_id="__none__", op=op_b, message="msg b", agent="bob", now=T0)
         _git(self.ha, "pull", "--rebase")
         lines = (self.ha / "store" / "messages.jsonl").read_text(encoding="utf-8").splitlines()
         self.assertEqual(len(lines), 2)
@@ -162,7 +172,7 @@ class TestGitops(unittest.TestCase):
             raise RuntimeError("boom")
 
         with self.assertRaises(RuntimeError):
-            publish(self.ha, task_id="__none__", op=op, message="x")
+            publish(self.ha, task_id="__none__", op=op, message="x", agent="alice", now=T0)
         self.assertEqual(
             subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
             "",
@@ -182,7 +192,10 @@ class TestGitops(unittest.TestCase):
         def add_task():
             return create_task(self.ha, title="U", created_by="op", now=T0)
 
-        t2 = publish(self.ha, task_id="__none__", op=add_task, message="inbox-add U")
+        t2 = publish(
+            self.ha, task_id="__none__", op=add_task, message="inbox-add U",
+            agent="alice", now=T0,
+        )
         profile = {
             "worker_lease_ttl": "15m",
             "orchestrator_lease_ttl": "30m",
@@ -246,7 +259,7 @@ class TestGitops(unittest.TestCase):
             path = write_lookback(self.ha, T0)
             return {"path": str(path)}
 
-        publish(self.ha, task_id="__none__", op=op, message="lookback")
+        publish(self.ha, task_id="__none__", op=op, message="lookback", agent="alice", now=T0)
         self.assertEqual(
             subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
             "",
@@ -293,7 +306,10 @@ class TestGitops(unittest.TestCase):
                         now=later,
                     )
 
-                gitops.publish(self.ha, task_id="__none__", op=op_a, message="msg a")
+                gitops.publish(
+                    self.ha, task_id="__none__", op=op_a, message="msg a",
+                    agent="alice", now=later,
+                )
             return real_run(hive, *args, check=check)
 
         gitops._run = wrapped
@@ -315,6 +331,345 @@ class TestGitops(unittest.TestCase):
             subprocess.check_output(["git", "status", "--porcelain"], cwd=self.hb, text=True),
             "",
         )
+
+    # --- item 1: unpushed local commit must never be destroyed ---
+
+    def _head(self, repo):
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    def _local_claim_commit(self, hive, agent, harness, now):
+        from rip_swarm.claim import try_claim
+
+        try_claim(hive, self.task["id"], agent, harness, now, 900)
+        _git(hive, "add", "-A")
+        _git(hive, "commit", "-m", f"{agent} local claim")
+        return self._head(hive)
+
+    def test_unpushed_commit_survives_expired_remote_claim(self):
+        from rip_swarm.gitops import GitopsError
+        from rip_swarm.timeutil import add_seconds
+
+        claim_and_publish(
+            self.ha, task_id=self.task["id"], agent="alice", harness="claude-code",
+            now=T0, lease_seconds=1,
+        )
+        later = add_seconds(T0, 120)
+        _git(self.hb, "fetch")
+        _git(self.hb, "reset", "--hard", "@{u}")
+        head = self._local_claim_commit(self.hb, "bob", "codex", later)
+        # alice's claim on the remote tip is expired: this is not a lost race, but bob's
+        # unpushed commit must survive regardless of which error publish reports.
+        with self.assertRaises(GitopsError) as ctx:
+            claim_and_publish(
+                self.hb, task_id=self.task["id"], agent="bob", harness="codex",
+                now=later, lease_seconds=900,
+            )
+        self.assertNotIsInstance(ctx.exception, ClaimDenied)
+        self.assertEqual(self._head(self.hb), head)
+
+    def test_unpushed_commit_survives_unexpired_remote_claim(self):
+        claim_and_publish(
+            self.ha, task_id=self.task["id"], agent="alice", harness="claude-code",
+            now=T0, lease_seconds=900,
+        )
+        _git(self.hb, "fetch")
+        _git(self.hb, "reset", "--hard", "@{u}")
+        # bob's local claim file loses to alice on the remote tip, but bob's commit survives.
+        _git(self.hb, "rm", "-q", "--cached", f"claims/{self.task['id']}.json")
+        (self.hb / "notes.txt").write_text("bob work\n", encoding="utf-8")
+        _git(self.hb, "add", "-A")
+        _git(self.hb, "commit", "-m", "bob local work")
+        head = self._head(self.hb)
+        with self.assertRaises(ClaimDenied):
+            claim_and_publish(
+                self.hb, task_id=self.task["id"], agent="bob", harness="codex",
+                now=T0, lease_seconds=900,
+            )
+        self.assertEqual(self._head(self.hb), head)
+        self.assertTrue((self.hb / "notes.txt").exists())
+
+    def test_unpushed_commit_survives_none_task_publish(self):
+        from rip_swarm.gitops import GitopsError
+
+        (self.ha / "notes.txt").write_text("local only\n", encoding="utf-8")
+        _git(self.ha, "add", "-A")
+        _git(self.ha, "commit", "-m", "unpushed local work")
+        head = self._head(self.ha)
+        with self.assertRaises(GitopsError) as ctx:
+            publish(
+                self.ha,
+                task_id="__none__",
+                op=lambda: write_message(
+                    self.ha, agent="alice", harness="claude-code", type="ops",
+                    to="*", body={"text": "x"}, now=T0,
+                ),
+                message="msg",
+                agent="alice",
+                now=T0,
+            )
+        self.assertNotIsInstance(ctx.exception, ClaimDenied)
+        self.assertEqual(self._head(self.ha), head)
+        self.assertTrue((self.ha / "notes.txt").exists())
+
+    # --- item 2: malformed claim on the remote tip ---
+
+    def test_unreadable_remote_claim_denies_instead_of_crashing(self):
+        path = self.ha / "claims" / f"{self.task['id']}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("not json", encoding="utf-8")
+        _git(self.ha, "add", "-A")
+        _git(self.ha, "commit", "-m", "corrupt claim")
+        _git(self.ha, "push")
+        _git(self.hb, "fetch")
+        with self.assertRaises(ClaimDenied) as ctx:
+            claim_and_publish(
+                self.hb, task_id=self.task["id"], agent="bob", harness="codex",
+                now=T0, lease_seconds=900,
+            )
+        self.assertIn("unreadable claim", str(ctx.exception))
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.hb, text=True),
+            "",
+        )
+
+    # --- item 3: symlink pointing outside the hive ---
+
+    def test_untracked_symlink_outside_hive_is_removed_and_target_survives(self):
+        target = self.a / "app.py"
+        before = target.read_text(encoding="utf-8")
+
+        def op():
+            (self.ha / "escape.py").symlink_to(target)
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            publish(self.ha, task_id="__none__", op=op, message="x", agent="alice", now=T0)
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+        self.assertFalse((self.ha / "escape.py").is_symlink())
+        self.assertTrue(target.is_file())
+        self.assertEqual(target.read_text(encoding="utf-8"), before)
+
+    def test_untracked_dir_symlink_outside_hive_is_removed_and_target_survives(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (outside / "keep.txt").write_text("keep\n", encoding="utf-8")
+
+        def op():
+            (self.ha / "escape_dir").symlink_to(outside, target_is_directory=True)
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            publish(self.ha, task_id="__none__", op=op, message="x", agent="alice", now=T0)
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+        self.assertFalse((self.ha / "escape_dir").is_symlink())
+        self.assertTrue((outside / "keep.txt").is_file())
+
+    # --- item 4: agent/now required; rebase conflict on the claim file ---
+
+    def test_publish_requires_agent_and_now(self):
+        with self.assertRaises(TypeError):
+            publish(self.ha, task_id="__none__", op=lambda: {}, message="x")
+
+    def test_rebase_addadd_conflict_on_claim_is_lost_race(self):
+        from rip_swarm import gitops
+
+        real_run = gitops._run
+        injected = {"done": False}
+
+        def wrapped(hive, *args, check=True):
+            if Path(hive).resolve() == self.hb.resolve() and args[:1] == ("push",) and not injected["done"]:
+                injected["done"] = True
+                # alice lands her claim AND expires it, so the expiry-aware check does not
+                # short-circuit: the rebase must hit an add/add conflict on the claim file.
+                claim_and_publish(
+                    self.ha, task_id=self.task["id"], agent="alice",
+                    harness="claude-code", now=T0, lease_seconds=1,
+                )
+            return real_run(hive, *args, check=check)
+
+        gitops._run = wrapped
+        try:
+            from rip_swarm.timeutil import add_seconds
+
+            later = add_seconds(T0, 300)
+            with self.assertRaises(ClaimDenied) as ctx:
+                claim_and_publish(
+                    self.hb, task_id=self.task["id"], agent="bob", harness="codex",
+                    now=later, lease_seconds=900,
+                )
+        finally:
+            gitops._run = real_run
+        self.assertTrue(injected["done"])
+        self.assertIn("lost race", str(ctx.exception))
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.hb, text=True),
+            "",
+        )
+        self.assertFalse((self.hb / ".git" / "rebase-merge").exists())
+        self.assertFalse((self.hb / ".git" / "rebase-apply").exists())
+
+    # --- item 6: helper retry loop, conflicts, exhaustion ---
+
+    def test_union_merge_through_retry_loop(self):
+        # Force a rejected push mid-flight so the helper itself rebases; both JSONL
+        # appends must survive on both sides.
+        from rip_swarm import gitops
+
+        real_run = gitops._run
+        injected = {"done": False}
+
+        def wrapped(hive, *args, check=True):
+            if Path(hive).resolve() == self.hb.resolve() and args[:1] == ("push",) and not injected["done"]:
+                injected["done"] = True
+                gitops.publish(
+                    self.ha,
+                    task_id="__none__",
+                    op=lambda: write_message(
+                        self.ha, agent="alice", harness="claude-code", type="ops",
+                        to="*", body={"text": "a"}, now=T0,
+                    ),
+                    message="msg a",
+                    agent="alice",
+                    now=T0,
+                )
+            return real_run(hive, *args, check=check)
+
+        gitops._run = wrapped
+        try:
+            gitops.publish(
+                self.hb,
+                task_id="__none__",
+                op=lambda: write_message(
+                    self.hb, agent="bob", harness="codex", type="ops",
+                    to="*", body={"text": "b"}, now=T0,
+                ),
+                message="msg b",
+                agent="bob",
+                now=T0,
+            )
+        finally:
+            gitops._run = real_run
+        self.assertTrue(injected["done"])
+        lines = (self.hb / "store" / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual({json.loads(l)["from"]["agent"] for l in lines}, {"alice", "bob"})
+        _git(self.ha, "pull", "--rebase")
+        lines_a = (self.ha / "store" / "messages.jsonl").read_text(encoding="utf-8").splitlines()
+        self.assertEqual({json.loads(l)["from"]["agent"] for l in lines_a}, {"alice", "bob"})
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.hb, text=True),
+            "",
+        )
+
+    def test_rebase_conflict_on_non_jsonl_leaves_clean_tree(self):
+        from rip_swarm import gitops
+        from rip_swarm.gitops import GitopsError
+
+        real_run = gitops._run
+        injected = {"done": False}
+
+        def edit_registry(hive, text):
+            (hive / "agents" / "registry.yaml").write_text(text, encoding="utf-8")
+            return {"ok": True}
+
+        def wrapped(hive, *args, check=True):
+            if Path(hive).resolve() == self.hb.resolve() and args[:1] == ("push",) and not injected["done"]:
+                injected["done"] = True
+                gitops.publish(
+                    self.ha,
+                    task_id="__none__",
+                    op=lambda: edit_registry(self.ha, REGISTRY + "# alice\n"),
+                    message="reg a",
+                    agent="alice",
+                    now=T0,
+                )
+            return real_run(hive, *args, check=check)
+
+        gitops._run = wrapped
+        try:
+            with self.assertRaises(GitopsError):
+                gitops.publish(
+                    self.hb,
+                    task_id="__none__",
+                    op=lambda: edit_registry(self.hb, REGISTRY + "# bob\n"),
+                    message="reg b",
+                    agent="bob",
+                    now=T0,
+                )
+        finally:
+            gitops._run = real_run
+        self.assertTrue(injected["done"])
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.hb, text=True),
+            "",
+        )
+        self.assertFalse((self.hb / ".git" / "rebase-merge").exists())
+        self.assertFalse((self.hb / ".git" / "rebase-apply").exists())
+        self.assertEqual(
+            self._head(self.hb),
+            subprocess.check_output(
+                ["git", "rev-parse", "@{u}"], cwd=self.hb, text=True
+            ).strip(),
+        )
+
+    def test_max_attempts_exhaustion_raises_with_clean_tree(self):
+        from rip_swarm import gitops
+        from rip_swarm.gitops import GitopsError
+
+        real_run = gitops._run
+        pushes = {"n": 0}
+
+        def wrapped(hive, *args, check=True):
+            if Path(hive).resolve() == self.hb.resolve() and args[:1] == ("push",):
+                pushes["n"] += 1
+                gitops.publish(
+                    self.ha,
+                    task_id="__none__",
+                    op=lambda: write_message(
+                        self.ha, agent="alice", harness="claude-code", type="ops",
+                        to="*", body={"text": f"a{pushes['n']}"}, now=T0,
+                    ),
+                    message=f"msg a{pushes['n']}",
+                    agent="alice",
+                    now=T0,
+                )
+            return real_run(hive, *args, check=check)
+
+        gitops._run = wrapped
+        try:
+            with self.assertRaises(GitopsError) as ctx:
+                gitops.publish(
+                    self.hb,
+                    task_id="__none__",
+                    op=lambda: write_message(
+                        self.hb, agent="bob", harness="codex", type="ops",
+                        to="*", body={"text": "b"}, now=T0,
+                    ),
+                    message="msg b",
+                    max_attempts=2,
+                    agent="bob",
+                    now=T0,
+                )
+        finally:
+            gitops._run = real_run
+        self.assertIn("max attempts", str(ctx.exception))
+        self.assertEqual(pushes["n"], 2)
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.hb, text=True),
+            "",
+        )
+        self.assertEqual(
+            self._head(self.hb),
+            subprocess.check_output(
+                ["git", "rev-parse", "@{u}"], cwd=self.hb, text=True
+            ).strip(),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,7 +21,8 @@ class TestCli(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_init_inbox_claim_status_local(self):
-        self.assertEqual(main(["init", "--hive", str(self.hive), "--no-git"]), 0)
+        with redirect_stdout(io.StringIO()):
+            self.assertEqual(main(["init", "--hive", str(self.hive), "--no-git"]), 0)
         self.assertEqual(
             main(["inbox-add", "--hive", str(self.hive), "--title", "X", "--created-by", "op", "--local"]),
             0,
@@ -375,6 +376,217 @@ class TestCli(unittest.TestCase):
         )
         self.assertEqual(complete_help.returncode, 0)
         self.assertIn("result-ref", complete_help.stdout)
+
+    def test_init_says_what_it_did(self):
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.assertEqual(main(["init", "--hive", str(self.hive), "--no-git"]), 0)
+        out = buf.getvalue()
+        self.assertIn(str(self.hive), out)
+        self.assertNotEqual(out.strip(), "copied")
+
+    def test_init_rejects_runtime_flags(self):
+        for flag in ("--local", "--agent", "--harness", "--profile"):
+            extra = [flag] if flag == "--local" else [flag, "x"]
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+                main(["init", "--hive", str(self.hive), "--no-git", *extra])
+            self.assertEqual(cm.exception.code, 2)
+
+    def test_status_with_unknown_profile_falls_back(self):
+        self._seed_alice_bob()
+        buf = io.StringIO()
+        with redirect_stdout(buf), redirect_stderr(io.StringIO()):
+            rc = main(["status", "--hive", str(self.hive), "--profile", "nope"])
+        self.assertEqual(rc, 0)
+
+    def test_promote_by_operator_in_profile(self):
+        self._seed_alice_bob()
+        path = self.hive / "profiles" / "default.yaml"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(text.replace("operators: []", "operators: [op]"), encoding="utf-8")
+        self.assertEqual(
+            main([
+                "promote", "--hive", str(self.hive), "--agent", "alice",
+                "--harness", "claude-code", "--by", "op",
+                "--reason", "operator designated", "--local",
+            ]),
+            0,
+        )
+        self.assertTrue((self.hive / "claims" / "orchestrator.json").is_file())
+        self.assertTrue((self.hive / "orchestrator" / "CURRENT.json").is_file())
+
+    def test_release_orchestrator_via_cli(self):
+        self._seed_alice_bob()
+        path = self.hive / "profiles" / "default.yaml"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("operators: []", "operators: [op]"),
+            encoding="utf-8",
+        )
+        self.assertEqual(
+            main([
+                "promote", "--hive", str(self.hive), "--agent", "alice",
+                "--harness", "claude-code", "--by", "op", "--local",
+            ]),
+            0,
+        )
+        self.assertEqual(
+            main([
+                "release", "--hive", str(self.hive), "--task", "orchestrator",
+                "--agent", "alice", "--local",
+            ]),
+            0,
+        )
+        self.assertFalse((self.hive / "claims" / "orchestrator.json").exists())
+        self.assertFalse((self.hive / "orchestrator" / "CURRENT.json").exists())
+
+    def test_local_on_publishable_hive_warns(self):
+        self._hive_with_upstream()
+        err = io.StringIO()
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            rc = main([
+                "inbox-add", "--hive", str(self.hive), "--title", "L",
+                "--created-by", "op", "--local",
+            ])
+        self.assertEqual(rc, 0)
+        msg = err.getvalue()
+        self.assertIn("--local", msg)
+        self.assertIn(f"git -C {self.hive} status", msg)
+
+    def test_dirty_hive_error_names_recovery(self):
+        self._hive_with_upstream()
+        (self.hive / "stray.txt").write_text("dirt\n", encoding="utf-8")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main([
+                "inbox-add", "--hive", str(self.hive), "--title", "D", "--created-by", "op",
+            ])
+        self.assertEqual(rc, 1)
+        msg = err.getvalue()
+        self.assertIn("dirty", msg.lower())
+        self.assertIn(f"git -C {self.hive} status", msg)
+
+    # --- git-backed CLI flows ---
+
+    def _project_clone(self, name: str, origin: Path) -> Path:
+        work = Path(self.tmp.name) / name
+        subprocess.check_call(
+            ["git", "clone", "-q", str(origin), str(work)], stdout=subprocess.DEVNULL
+        )
+        for k, v in (("user.email", "t@example.com"), ("user.name", "T"), ("commit.gpgsign", "false")):
+            subprocess.check_call(["git", "-C", str(work), "config", k, v])
+        return work
+
+    def _bare_project_origin(self) -> Path:
+        origin = Path(self.tmp.name) / "project.git"
+        subprocess.check_call(
+            ["git", "init", "--bare", "-q", "-b", "main", str(origin)],
+            stdout=subprocess.DEVNULL,
+        )
+        seed = Path(self.tmp.name) / "seed"
+        subprocess.check_call(
+            ["git", "init", "-q", "-b", "main", str(seed)], stdout=subprocess.DEVNULL
+        )
+        for k, v in (("user.email", "t@example.com"), ("user.name", "T"), ("commit.gpgsign", "false")):
+            subprocess.check_call(["git", "-C", str(seed), "config", k, v])
+        subprocess.check_call(["git", "-C", str(seed), "remote", "add", "origin", str(origin)])
+        (seed / "README.md").write_text("project\n", encoding="utf-8")
+        subprocess.check_call(["git", "-C", str(seed), "add", "-A"], stdout=subprocess.DEVNULL)
+        subprocess.check_call(["git", "-C", str(seed), "commit", "-qm", "seed"])
+        subprocess.check_call(
+            ["git", "-C", str(seed), "push", "-q", "origin", "main"], stdout=subprocess.DEVNULL
+        )
+        return origin
+
+    def _register_agents(self, hive: Path) -> None:
+        (hive / "agents" / "registry.yaml").write_text(
+            "- id: alice\n  harness: claude-code\n  role: worker\n"
+            "- id: bob\n  harness: codex\n  role: worker\n"
+            "- id: op\n  harness: claude-code\n  role: operator\n",
+            encoding="utf-8",
+        )
+        subprocess.check_call(["git", "-C", str(hive), "add", "-A"], stdout=subprocess.DEVNULL)
+        subprocess.check_call(["git", "-C", str(hive), "commit", "-qm", "agents"])
+        subprocess.check_call(
+            ["git", "-C", str(hive), "push", "-q", "origin", "HEAD"], stdout=subprocess.DEVNULL
+        )
+
+    def _cli_init_in(self, work: Path, hive: Path) -> None:
+        cwd = os.getcwd()
+        os.chdir(str(work))
+        try:
+            with redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["init", "--hive", str(hive)]), 0)
+        finally:
+            os.chdir(cwd)
+        for k, v in (("user.email", "t@example.com"), ("user.name", "T"), ("commit.gpgsign", "false")):
+            subprocess.check_call(["git", "-C", str(hive), "config", k, v])
+
+    def test_cli_init_bootstraps_then_publishes(self):
+        origin = self._bare_project_origin()
+        work = self._project_clone("work", origin)
+        hive = work / "_swarm"
+        self._cli_init_in(work, hive)
+        self.assertTrue((hive / "PROTOCOL.md").is_file())
+        self._register_agents(hive)
+        self.assertEqual(
+            main(["inbox-add", "--hive", str(hive), "--title", "Pub", "--created-by", "op"]),
+            0,
+        )
+        task_id = next(iter((hive / "inbox").glob("task_*.json"))).stem
+        self.assertEqual(
+            main([
+                "claim", "--hive", str(hive), "--task", task_id,
+                "--agent", "alice", "--harness", "claude-code",
+            ]),
+            0,
+        )
+        listed = subprocess.check_output(
+            ["git", "--git-dir", str(origin), "ls-tree", "-r", "--name-only", "swarm"],
+            text=True,
+        )
+        self.assertIn(f"claims/{task_id}.json", listed)
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(hive), "status", "--porcelain"], text=True
+            ),
+            "",
+        )
+
+    def test_cli_two_clone_lost_race(self):
+        origin = self._bare_project_origin()
+        work_a = self._project_clone("work_a", origin)
+        hive_a = work_a / "_swarm"
+        self._cli_init_in(work_a, hive_a)
+        self._register_agents(hive_a)
+        self.assertEqual(
+            main(["inbox-add", "--hive", str(hive_a), "--title", "Race", "--created-by", "op"]),
+            0,
+        )
+        task_id = next(iter((hive_a / "inbox").glob("task_*.json"))).stem
+
+        work_b = self._project_clone("work_b", origin)
+        hive_b = work_b / "_swarm"
+        self._cli_init_in(work_b, hive_b)
+        self.assertEqual(
+            main([
+                "claim", "--hive", str(hive_a), "--task", task_id,
+                "--agent", "alice", "--harness", "claude-code",
+            ]),
+            0,
+        )
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main([
+                "claim", "--hive", str(hive_b), "--task", task_id,
+                "--agent", "bob", "--harness", "codex",
+            ])
+        self.assertEqual(rc, 2)
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(hive_b), "status", "--porcelain"], text=True
+            ),
+            "",
+        )
 
 
 if __name__ == "__main__":

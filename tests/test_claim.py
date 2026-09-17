@@ -3,10 +3,11 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from rip_swarm.claim import ClaimDenied, complete, heartbeat, reject, release, try_claim
+from rip_swarm.claim import ClaimDenied, complete, heartbeat, reject, release, tombstone_claim, try_claim
 from rip_swarm.inbox import create_task
 from rip_swarm.io import read_json
 from rip_swarm.timeutil import add_seconds, format_z, parse_z
+import json
 
 T0 = datetime(2026, 9, 17, 9, 1, 0, tzinfo=timezone.utc)
 
@@ -56,6 +57,7 @@ class TestClaim(unittest.TestCase):
         self.assertFalse((self.hive / "claims" / f"{self.task['id']}.json").exists())
         done = list((self.hive / "claims").glob(f"{self.task['id']}.complete.*"))
         self.assertEqual(len(done), 1)
+        self.assertEqual(done[0].name, f"{self.task['id']}.complete.20260917T090100Z.json")
         self.assertEqual(read_json(done[0])["result_ref"], "agents/alice/outbox/msg_x.json")
 
     def test_non_holder_complete_ignored(self):
@@ -87,6 +89,170 @@ class TestClaim(unittest.TestCase):
         complete(self.hive, self.task["id"], "alice", later, result_ref="x")
         self.assertTrue(list((self.hive / "claims").glob(f"{self.task['id']}.expired.*")))
         self.assertEqual(read_json(next((self.hive / "claims").glob(f"{self.task['id']}.complete.*")))["claim_id"], doc["claim_id"])
+
+    def _audit(self):
+        log = self.hive / "store" / "claims.jsonl"
+        if not log.is_file():
+            return []
+        return [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines() if x.strip()]
+
+    # --- tombstone collisions -------------------------------------------------
+    def test_two_complete_cycles_at_same_now_keep_both_tombstones(self):
+        tid = self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        complete(self.hive, tid, "alice", T0, result_ref="r1")
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        complete(self.hive, tid, "alice", T0, result_ref="r2")
+        done = sorted((self.hive / "claims").glob(f"{tid}.complete.*"))
+        self.assertEqual(len(done), 2)
+        names = {p.name for p in done}
+        self.assertIn(f"{tid}.complete.20260917T090100Z.json", names)
+        self.assertIn(f"{tid}.complete.20260917T090100Z-2.json", names)
+        refs = sorted(read_json(p)["result_ref"] for p in done)
+        self.assertEqual(refs, ["r1", "r2"])
+
+    def test_tombstone_collision_third_gets_dash_3(self):
+        claims = self.hive / "claims"
+        claims.mkdir(parents=True, exist_ok=True)
+        for i in range(3):
+            src = claims / f"{self.task['id']}.json"
+            src.write_text(json.dumps({"n": i}), encoding="utf-8")
+            tombstone_claim(src, "release", T0)
+        names = sorted(p.name for p in claims.glob(f"{self.task['id']}.release.*"))
+        self.assertEqual(names, [
+            f"{self.task['id']}.release.20260917T090100Z-2.json",
+            f"{self.task['id']}.release.20260917T090100Z-3.json",
+            f"{self.task['id']}.release.20260917T090100Z.json",
+        ])
+
+    def test_stamp_uses_utc_for_aware_non_utc_now(self):
+        from datetime import timedelta
+        local = datetime(2026, 9, 17, 11, 1, 0, tzinfo=timezone(timedelta(hours=2)))
+        try_claim(self.hive, self.task["id"], "alice", "claude-code", local, 900)
+        complete(self.hive, self.task["id"], "alice", local, result_ref="r")
+        done = list((self.hive / "claims").glob(f"{self.task['id']}.complete.*"))
+        self.assertEqual(len(done), 1)
+        self.assertEqual(done[0].name, f"{self.task['id']}.complete.20260917T090100Z.json")
+
+    # --- steal race -----------------------------------------------------------
+    def test_lost_race_stealing_expired_claim(self):
+        """The other stealer tombstones the file first; our tombstone of a
+        now-missing source must be a refusal, not a traceback."""
+        import rip_swarm.claim as claim_mod
+        tid = self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        later = add_seconds(T0, 901)
+        active = self.hive / "claims" / f"{tid}.json"
+        real = claim_mod.tombstone_claim
+
+        def racing(path, action, now):
+            # the rival wins: the active file is gone before we touch it
+            Path(path).unlink()
+            return real(path, action, now)
+
+        claim_mod.tombstone_claim = racing
+        try:
+            with self.assertRaises(ClaimDenied) as ctx:
+                try_claim(self.hive, tid, "bob", "codex", later, 900)
+        finally:
+            claim_mod.tombstone_claim = real
+        self.assertIn("lost race stealing expired claim", str(ctx.exception))
+        self.assertFalse(active.exists())
+
+    def test_tombstone_claim_raises_file_not_found_when_source_gone(self):
+        missing = self.hive / "claims" / f"{self.task['id']}.json"
+        missing.parent.mkdir(parents=True, exist_ok=True)
+        with self.assertRaises(FileNotFoundError):
+            tombstone_claim(missing, "expired", T0)
+
+    # --- active path never carries result_ref --------------------------------
+    def test_complete_never_writes_result_ref_to_active_path(self):
+        tid = self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        active = self.hive / "claims" / f"{tid}.json"
+        seen = []
+        import rip_swarm.io as io_mod
+        real = io_mod.os.replace
+
+        def spy(src, dst):
+            if str(dst) == str(active):
+                seen.append(read_json(Path(src)))
+            return real(src, dst)
+
+        io_mod.os.replace = spy
+        try:
+            complete(self.hive, tid, "alice", T0, result_ref="r")
+        finally:
+            io_mod.os.replace = real
+        self.assertTrue(all("result_ref" not in d for d in seen))
+        self.assertFalse(active.exists())
+
+    # --- release --------------------------------------------------------------
+    def test_release_by_holder(self):
+        tid = self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        release(self.hive, tid, "alice", T0, note="stepping away")
+        self.assertFalse((self.hive / "claims" / f"{tid}.json").exists())
+        dest = self.hive / "claims" / f"{tid}.release.20260917T090100Z.json"
+        self.assertTrue(dest.is_file())
+        self.assertEqual(read_json(dest)["note"], "stepping away")
+        self.assertNotIn("result_ref", read_json(dest))
+        self.assertEqual(self._audit()[-1]["action"], "release")
+        self.assertEqual(self._audit()[-1]["note"], "stepping away")
+
+    def test_release_by_non_holder_leaves_file_unchanged(self):
+        tid = self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        active = self.hive / "claims" / f"{tid}.json"
+        before = active.read_bytes()
+        with self.assertRaises(ClaimDenied):
+            release(self.hive, tid, "bob", T0, note="nope")
+        self.assertEqual(active.read_bytes(), before)
+        self.assertEqual(list((self.hive / "claims").glob(f"{tid}.release.*")), [])
+        self.assertEqual([r["action"] for r in self._audit()], ["claim"])
+
+    # --- reject ---------------------------------------------------------------
+    def test_reject_by_holder(self):
+        tid = self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        reject(self.hive, tid, "alice", T0, note="out of scope")
+        self.assertFalse((self.hive / "claims" / f"{tid}.json").exists())
+        dest = self.hive / "claims" / f"{tid}.reject.20260917T090100Z.json"
+        self.assertTrue(dest.is_file())
+        self.assertEqual(read_json(dest)["note"], "out of scope")
+        self.assertEqual(self._audit()[-1]["action"], "reject")
+        self.assertEqual(self._audit()[-1]["note"], "out of scope")
+
+    def test_reject_by_non_holder_leaves_file_unchanged(self):
+        tid = self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        active = self.hive / "claims" / f"{tid}.json"
+        before = active.read_bytes()
+        with self.assertRaises(ClaimDenied):
+            reject(self.hive, tid, "bob", T0, note="nope")
+        self.assertEqual(active.read_bytes(), before)
+        self.assertEqual(list((self.hive / "claims").glob(f"{tid}.reject.*")), [])
+        self.assertEqual([r["action"] for r in self._audit()], ["claim"])
+
+    def test_release_without_note_keeps_original_note(self):
+        tid = self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900, note="initial")
+        release(self.hive, tid, "alice", T0)
+        dest = self.hive / "claims" / f"{tid}.release.20260917T090100Z.json"
+        self.assertEqual(read_json(dest)["note"], "initial")
+
+    # --- path traversal -------------------------------------------------------
+    def test_try_claim_rejects_unsafe_task_ids(self):
+        for tid in ["../evil", "a/b", "a\\b", "..", ".hidden", "x/../y", "./x"]:
+            with self.subTest(tid=tid):
+                with self.assertRaises(ClaimDenied):
+                    try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+
+    def test_try_claim_traversal_writes_nothing_outside_claims(self):
+        outside = self.hive / "pwned.json"
+        with self.assertRaises(ClaimDenied):
+            try_claim(self.hive, "../pwned", "alice", "claude-code", T0, 900)
+        self.assertFalse(outside.exists())
 
 if __name__ == "__main__":
     unittest.main()

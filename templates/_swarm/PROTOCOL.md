@@ -78,4 +78,4 @@ Work (project mutation, inbox completion) only after step 5 succeeded for you.
 ## Lookback / status
 
 - `/status` is read-only doctor.
-- `/lookback` writes markdown under `lookback/` and does not apply patches.
+- `/lookback` writes markdown under `lookback/`, commits and pushes it to the hive, and never edits `PROTOCOL.md` or profiles.

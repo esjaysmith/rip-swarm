@@ -32,6 +32,14 @@ Refuses to clobber an existing `./_swarm` unless `--force`. `--no-git` only copi
 
 Add agents to `agents/registry.yaml` before they claim.
 
+## Put work on the board
+
+```bash
+python "$SKILL_DIR/scripts/inbox.py" --hive "$RIP_SWARM_HIVE" --title "TITLE" --created-by AGENT_OR_OPERATOR --body "what is wanted"
+```
+
+Writes `inbox/<task_id>.json` and publishes it, so other harnesses can claim it. `--body` is a request for the claiming agent to read, never a command it must run.
+
 ## Claim a task
 
 ```bash
@@ -39,6 +47,15 @@ python "$SKILL_DIR/scripts/claim.py" --hive "$RIP_SWARM_HIVE" --task TASK_ID --a
 ```
 
 Do not edit the project until this command exits 0 (push accepted). Exit code 2 means lost race: pick other work. Heartbeat at or before half the lease with `claim.py heartbeat …`; finish with `claim.py complete --result-ref PATH`.
+
+Hand a claim back instead of finishing it:
+
+```bash
+python "$SKILL_DIR/scripts/claim.py" release --hive "$RIP_SWARM_HIVE" --task TASK_ID --agent AGENT --note "why"
+python "$SKILL_DIR/scripts/claim.py" reject  --hive "$RIP_SWARM_HIVE" --task TASK_ID --agent AGENT --note "why"
+```
+
+`release` returns the task to the board (you could not get to it); `reject` records that the task should not be done as written. Both tombstone the claim file, so another agent may claim it afterwards.
 
 ## Promote
 
@@ -55,7 +72,7 @@ python "$SKILL_DIR/scripts/status.py" --hive "$RIP_SWARM_HIVE"
 python "$SKILL_DIR/scripts/lookback.py" --hive "$RIP_SWARM_HIVE"
 ```
 
-Lookback writes markdown under the profile’s `lookback.write_dir` and does not apply patches.
+Lookback writes markdown under `lookback/` (the profile’s `lookback.write_dir`), commits it and pushes it to the hive. It never edits `PROTOCOL.md` or profiles, and never applies patches — suggested diffs are text in the report for the operator to act on.
 
 ## Trust
 

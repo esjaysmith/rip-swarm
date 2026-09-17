@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from rip_swarm.claim import try_claim
+from rip_swarm.claim import complete, reject, try_claim
 from rip_swarm.inbox import create_task
 from rip_swarm.io import atomic_write_json
 from rip_swarm.orchestrator import promote
@@ -70,6 +70,48 @@ class TestStatus(unittest.TestCase):
         try_claim(self.hive, t["id"], "alice", "claude-code", T0, 900)
         r = status_report(self.hive, add_seconds(T0, 901))
         self.assertEqual(r["expired_claim_files"], [t["id"]])
+
+    def test_orchestrator_excluded_from_active_claims(self):
+        t = create_task(self.hive, title="T", created_by="op", now=T0)
+        try_claim(self.hive, "orchestrator", "alice", "claude-code", T0, 1800)
+        try_claim(self.hive, t["id"], "alice", "claude-code", T0, 900)
+        r = status_report(self.hive, T0)
+        self.assertEqual([c["task_id"] for c in r["active_claims"]], [t["id"]])
+        self.assertNotIn("orchestrator", r["inbox_without_claim"])
+
+    def test_inbox_without_claim_excludes_completed(self):
+        done = create_task(self.hive, title="done", created_by="op", now=T0)
+        rejected = create_task(self.hive, title="rej", created_by="op", now=T0)
+        open_t = create_task(self.hive, title="open", created_by="op", now=T0)
+        try_claim(self.hive, done["id"], "alice", "claude-code", T0, 900)
+        complete(self.hive, done["id"], "alice", T0, result_ref="r")
+        try_claim(self.hive, rejected["id"], "alice", "claude-code", T0, 900)
+        reject(self.hive, rejected["id"], "alice", T0, note="no")
+        r = status_report(self.hive, T0)
+        self.assertEqual(r["inbox_without_claim"], sorted([rejected["id"], open_t["id"]]))
+
+    def test_corrupt_claims_reported_and_no_crash(self):
+        claims = self.hive / "claims"
+        claims.mkdir(parents=True, exist_ok=True)
+        (claims / "task_bad.json").write_text("{not json", encoding="utf-8")
+        (claims / "task_empty.json").write_text("", encoding="utf-8")
+        t = create_task(self.hive, title="T", created_by="op", now=T0)
+        try_claim(self.hive, t["id"], "alice", "claude-code", T0, 900)
+        r = status_report(self.hive, T0)
+        self.assertEqual(sorted(c["task_id"] for c in r["corrupt_claims"]),
+                         ["task_bad", "task_empty"])
+        for c in r["corrupt_claims"]:
+            self.assertEqual(sorted(c), ["error", "path", "task_id"])
+            self.assertTrue(c["error"])
+        self.assertEqual([c["task_id"] for c in r["active_claims"]], [t["id"]])
+        out = format_status(r)
+        self.assertIn("corrupt_claims:", out)
+        self.assertIn("task_bad", out)
+
+    def test_corrupt_claims_empty_section_printed(self):
+        r = status_report(self.hive, T0)
+        self.assertEqual(r["corrupt_claims"], [])
+        self.assertIn("corrupt_claims:", format_status(r))
 
 if __name__ == "__main__":
     unittest.main()

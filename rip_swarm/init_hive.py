@@ -29,14 +29,47 @@ def init_hive(
     return _init_copy(dest, force=force, template=template)
 
 
+def _is_hive_marked(dest: Path) -> bool:
+    return (dest / "PROTOCOL.md").exists() or (dest / "profiles").exists()
+
+
 def _init_copy(dest: Path, *, force: bool, template: Path) -> str:
-    marked = (dest / "PROTOCOL.md").exists() or (dest / "profiles").exists()
-    if marked and not force:
-        raise FileExistsError(dest)
-    if dest.exists() and force:
+    """Copy the template into `dest` (--no-git).
+
+    Refuse whenever `dest` already exists and `force` is not set -- the marker files
+    are not a licence to clobber an unrelated directory. Under `force`, only remove a
+    directory that carries the hive marker (PROTOCOL.md or profiles/); anything else
+    is someone else's data and is refused with a clear message.
+    """
+    if dest.exists():
+        if not force:
+            raise FileExistsError(dest)
+        if not _is_hive_marked(dest):
+            raise GitopsError(
+                f"{dest} exists but is not a hive (no PROTOCOL.md or profiles/); "
+                "refusing to remove it -- delete it yourself or pick another path"
+            )
         shutil.rmtree(dest)
     shutil.copytree(template, dest)
     return "copied"
+
+
+def _assert_force_removable(dest: Path) -> None:
+    """Refuse --force on a hive checkout holding work the remote does not have."""
+    top = _git("-C", str(dest), "rev-parse", "--show-toplevel", check=False)
+    if top.returncode != 0 or Path(top.stdout.strip()).resolve() != dest.resolve():
+        return
+    if _git("-C", str(dest), "status", "--porcelain", check=False).stdout.strip():
+        raise GitopsError(
+            f"{dest} is a hive checkout with a dirty work tree; "
+            "push or discard those changes before re-running init --force"
+        )
+    ahead = _git("-C", str(dest), "rev-list", "@{u}..HEAD", check=False)
+    if ahead.returncode == 0 and ahead.stdout.strip():
+        raise GitopsError(
+            f"{dest} is a hive checkout with unpushed commits; "
+            "push or discard them before re-running init --force"
+        )
 
 
 def _init_git(
@@ -50,6 +83,7 @@ def _init_git(
     if dest.exists():
         if not force:
             raise FileExistsError(dest)
+        _assert_force_removable(dest)
         shutil.rmtree(dest)
     project = _project_root(dest)
     url = _remote_url(project, remote)

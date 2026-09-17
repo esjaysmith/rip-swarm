@@ -67,5 +67,113 @@ class TestOutbox(unittest.TestCase):
                 to="nobody", body={}, now=T0,
             )
 
+    # --- body-shape enforcement (spec section 6) ---
+
+    def _assert_no_writes(self):
+        self.assertFalse((self.hive / "store" / "messages.jsonl").exists())
+        self.assertFalse((self.hive / "agents" / "alice" / "outbox").exists())
+
+    def test_budget_block_exact_body_accepted(self):
+        doc = write_message(
+            self.hive, agent="alice", harness="claude-code", type="budget_block",
+            to="orchestrator",
+            body={"agent": "alice", "rule": "max_claims_open_per_agent",
+                  "limit": 1, "observed": 1},
+            now=T0,
+        )
+        self.assertEqual(doc["topic"], "ops")
+        self.assertEqual(
+            set(doc["body"]), {"agent", "rule", "limit", "observed"}
+        )
+
+    def test_budget_block_extra_key_refused_before_any_write(self):
+        with self.assertRaises(ValueError):
+            write_message(
+                self.hive, agent="alice", harness="claude-code", type="budget_block",
+                to="orchestrator",
+                body={"agent": "alice", "rule": "r", "limit": 1, "observed": 1,
+                      "extra": "nope"},
+                now=T0,
+            )
+        self._assert_no_writes()
+
+    def test_budget_block_missing_key_refused_before_any_write(self):
+        with self.assertRaises(ValueError):
+            write_message(
+                self.hive, agent="alice", harness="claude-code", type="budget_block",
+                to="orchestrator",
+                body={"agent": "alice", "rule": "r", "limit": 1},
+                now=T0,
+            )
+        self._assert_no_writes()
+
+    def test_budget_block_renamed_key_refused(self):
+        with self.assertRaises(ValueError):
+            write_message(
+                self.hive, agent="alice", harness="claude-code", type="budget_block",
+                to="orchestrator",
+                body={"agent": "alice", "rule": "r", "limit": 1, "seen": 1},
+                now=T0,
+            )
+        self._assert_no_writes()
+
+    def test_promote_exact_body_accepted(self):
+        doc = write_message(
+            self.hive, agent="alice", harness="claude-code", type="promote", to="*",
+            body={"agent": "alice", "harness": "claude-code", "by": "alice",
+                  "reason": "designated", "claim_id": "clm_x"},
+            now=T0,
+        )
+        self.assertEqual(
+            set(doc["body"]), {"agent", "harness", "by", "reason", "claim_id"}
+        )
+
+    def test_promote_extra_key_refused_before_any_write(self):
+        with self.assertRaises(ValueError):
+            write_message(
+                self.hive, agent="alice", harness="claude-code", type="promote", to="*",
+                body={"agent": "alice", "harness": "claude-code", "by": "alice",
+                      "reason": "r", "claim_id": "clm_x", "extra": 1},
+                now=T0,
+            )
+        self._assert_no_writes()
+
+    def test_promote_missing_key_refused_before_any_write(self):
+        with self.assertRaises(ValueError):
+            write_message(
+                self.hive, agent="alice", harness="claude-code", type="promote", to="*",
+                body={"agent": "alice", "harness": "claude-code", "by": "alice",
+                      "reason": "r"},
+                now=T0,
+            )
+        self._assert_no_writes()
+
+    def test_non_shaped_types_accept_free_bodies(self):
+        for msg_type in ("ops", "note", "heartbeat"):
+            write_message(
+                self.hive, agent="alice", harness="claude-code", type=msg_type,
+                to="*", body={"anything": [1, 2]}, now=T0,
+            )
+        lines = (self.hive / "store" / "messages.jsonl").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        self.assertEqual(len(lines), 3)
+
+    def test_non_dict_body_refused_before_any_write(self):
+        with self.assertRaises(ValueError):
+            write_message(
+                self.hive, agent="alice", harness="claude-code", type="ops",
+                to="*", body=["not", "a", "dict"], now=T0,
+            )
+        self._assert_no_writes()
+
+    def test_bad_topic_refused_before_any_write(self):
+        with self.assertRaises(ValueError):
+            write_message(
+                self.hive, agent="alice", harness="claude-code", type="ops",
+                topic="nope", to="*", body={"text": "x"}, now=T0,
+            )
+        self._assert_no_writes()
+
 if __name__ == "__main__":
     unittest.main()

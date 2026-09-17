@@ -3,6 +3,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from rip_swarm.gitops import GitopsError
 from rip_swarm.init_hive import init_hive
 
 class TestInitHive(unittest.TestCase):
@@ -77,6 +78,102 @@ class TestInitHive(unittest.TestCase):
         init_hive(self.dest, force=True, git_init=False)
         self.assertNotEqual((self.dest / "PROTOCOL.md").read_text(encoding="utf-8"), "OLD\n")
         self.assertIn("rip-swarm PROTOCOL", (self.dest / "PROTOCOL.md").read_text(encoding="utf-8"))
+
+    # --- item 5a: --no-git clobber safety ---
+
+    def test_copy_refuses_existing_dest_without_force(self):
+        self.dest.mkdir(parents=True)
+        (self.dest / "important.txt").write_text("mine\n", encoding="utf-8")
+        with self.assertRaises(FileExistsError):
+            init_hive(self.dest, git_init=False)
+        self.assertTrue((self.dest / "important.txt").is_file())
+
+    def test_copy_force_refuses_non_hive_dest(self):
+        self.dest.mkdir(parents=True)
+        (self.dest / "important.txt").write_text("mine\n", encoding="utf-8")
+        with self.assertRaises(GitopsError) as ctx:
+            init_hive(self.dest, force=True, git_init=False)
+        self.assertIn("not a hive", str(ctx.exception))
+        self.assertTrue((self.dest / "important.txt").is_file())
+
+    # --- item 5b: --force must not discard a dirty / unpushed hive checkout ---
+
+    def test_force_refuses_dirty_hive_checkout(self):
+        origin, repo = self._origin_and_project("dirty")
+        dest = repo / "_swarm"
+        init_hive(dest)
+        (dest / "PROTOCOL.md").write_text("local edit\n", encoding="utf-8")
+        with self.assertRaises(GitopsError) as ctx:
+            init_hive(dest, force=True)
+        self.assertIn("push or discard", str(ctx.exception))
+        self.assertEqual((dest / "PROTOCOL.md").read_text(encoding="utf-8"), "local edit\n")
+
+    def test_force_refuses_unpushed_hive_commits(self):
+        origin, repo = self._origin_and_project("unpushed")
+        dest = repo / "_swarm"
+        init_hive(dest)
+        for k, v in (("user.email", "t@example.com"), ("user.name", "T"), ("commit.gpgsign", "false")):
+            subprocess.check_call(["git", "-C", str(dest), "config", k, v])
+        (dest / "local.txt").write_text("unpushed\n", encoding="utf-8")
+        subprocess.check_call(["git", "-C", str(dest), "add", "-A"], stdout=subprocess.DEVNULL)
+        subprocess.check_call(["git", "-C", str(dest), "commit", "-qm", "local"], stdout=subprocess.DEVNULL)
+        head = subprocess.check_output(["git", "-C", str(dest), "rev-parse", "HEAD"], text=True).strip()
+        with self.assertRaises(GitopsError) as ctx:
+            init_hive(dest, force=True)
+        self.assertIn("push or discard", str(ctx.exception))
+        self.assertEqual(
+            subprocess.check_output(["git", "-C", str(dest), "rev-parse", "HEAD"], text=True).strip(),
+            head,
+        )
+        self.assertTrue((dest / "local.txt").is_file())
+
+    def test_force_reclones_a_clean_synced_hive(self):
+        origin, repo = self._origin_and_project("clean")
+        dest = repo / "_swarm"
+        init_hive(dest)
+        (dest / "untracked-scratch.txt").unlink(missing_ok=True)
+        self.assertEqual(init_hive(dest, force=True), "attached")
+        self.assertTrue((dest / "PROTOCOL.md").is_file())
+
+    # --- item 6: init error paths ---
+
+    def test_no_origin_remote_reports_error(self):
+        repo = self._project("noremote")
+        with self.assertRaises(GitopsError):
+            init_hive(repo / "_swarm")
+        self.assertFalse((repo / "_swarm").exists())
+        self.assertFalse((repo / ".gitignore").exists())
+
+    def test_outside_a_git_repo_reports_error(self):
+        plain = Path(self.tmp.name) / "plain"
+        plain.mkdir()
+        with self.assertRaises(GitopsError):
+            init_hive(plain / "_swarm")
+        self.assertFalse((plain / "_swarm").exists())
+
+    def test_failed_push_leaves_nothing_behind_and_no_gitignore(self):
+        origin, repo = self._origin_and_project("nopush")
+        # The remote is reachable but refuses the push (no write rights): bootstrap must
+        # report the manual steps, leave no _swarm/ behind, and not touch .gitignore.
+        hook = origin / "hooks" / "pre-receive"
+        hook.parent.mkdir(parents=True, exist_ok=True)
+        hook.write_text("#!/bin/sh\necho denied >&2\nexit 1\n", encoding="utf-8")
+        hook.chmod(0o755)
+        with self.assertRaises(GitopsError) as ctx:
+            init_hive(repo / "_swarm")
+        self.assertIn("Manual steps", str(ctx.exception))
+        self.assertFalse((repo / "_swarm").exists())
+        self.assertFalse((repo / ".gitignore").exists())
+
+    def test_unreachable_remote_leaves_nothing_behind(self):
+        origin, repo = self._origin_and_project("dead")
+        dead = Path(self.tmp.name) / "dead.git"
+        subprocess.check_call(["git", "-C", str(repo), "remote", "set-url", "origin", str(dead)])
+        with self.assertRaises(GitopsError):
+            init_hive(repo / "_swarm")
+        self.assertFalse((repo / "_swarm").exists())
+        self.assertFalse((repo / ".gitignore").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

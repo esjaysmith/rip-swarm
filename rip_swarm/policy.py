@@ -20,33 +20,34 @@ def try_claim_with_policy(
     profile: dict,
     note: str | None = None,
 ) -> dict:
+    # The baton is not a task: it is acquired through promote, which also
+    # writes CURRENT.json and the promote audit message in the same commit.
+    if task_id == "orchestrator":
+        raise ClaimDenied("orchestrator baton is acquired with promote, not claim")
     require_agent(hive, agent)
     # allow_preempt is reserved; v0 never preempts unexpired claims.
-    if task_id == "orchestrator":
-        lease_seconds = parse_duration(profile["orchestrator_lease_ttl"])
-    else:
-        lease_seconds = parse_duration(profile["worker_lease_ttl"])
-        limit = profile["budget"]["max_claims_open_per_agent"]
-        observed = open_claim_count(hive, agent, now)
-        rec = active_holder(hive, task_id, now)
-        already_holder = isinstance(rec, Holder) and rec.agent == agent
-        if observed >= limit and not already_holder:
-            write_message(
-                hive,
-                agent=agent,
-                harness=harness,
-                type="budget_block",
-                to="orchestrator",
-                body={
-                    "agent": agent,
-                    "rule": "max_claims_open_per_agent",
-                    "limit": limit,
-                    "observed": observed,
-                },
-                now=now,
-            )
-            raise ClaimDenied(
-                f"max_claims_open_per_agent: {observed} >= {limit}",
-                commit=True,
-            )
+    lease_seconds = parse_duration(profile["worker_lease_ttl"])
+    limit = profile["budget"]["max_claims_open_per_agent"]
+    observed = open_claim_count(hive, agent, now)
+    rec = active_holder(hive, task_id, now)
+    already_holder = isinstance(rec, Holder) and rec.agent == agent
+    if observed >= limit and not already_holder:
+        write_message(
+            hive,
+            agent=agent,
+            harness=harness,
+            type="budget_block",
+            to="orchestrator",
+            body={
+                "agent": agent,
+                "rule": "max_claims_open_per_agent",
+                "limit": limit,
+                "observed": observed,
+            },
+            now=now,
+        )
+        raise ClaimDenied(
+            f"max_claims_open_per_agent: {observed} >= {limit}",
+            commit=True,
+        )
     return try_claim(hive, task_id, agent, harness, now, lease_seconds, note)

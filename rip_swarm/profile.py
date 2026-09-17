@@ -40,17 +40,28 @@ def deep_merge(base: dict, override: dict) -> dict:
 
 
 def load_profile(hive: Path, name: str | None, env: dict | None = None) -> dict:
+    """Resolve a profile: explicit name -> RIP_SWARM_PROFILE -> `default`.
+
+    DEFAULT_PROFILE is always the base (pillar D), so a partial or missing
+    `profiles/default.yaml` and a missing site file still yield a complete
+    profile instead of raising.
+    """
     e = os.environ if env is None else env
     resolved = name or e.get("RIP_SWARM_PROFILE") or "default"
     profiles = HivePaths(hive).profiles
-    result = _read_profile(profiles / "default.yaml")
+    result = deep_merge(DEFAULT_PROFILE, _read_profile(profiles / "default.yaml"))
     if resolved != "default":
         result = deep_merge(result, _read_profile(profiles / f"{resolved}.yaml"))
     return result
 
 
 def _read_profile(path: Path) -> dict:
+    """Read one profile file. A missing file contributes nothing."""
+    if not path.is_file():
+        return {}
     doc = load_yaml(path.read_text(encoding="utf-8"))
+    if doc is None:
+        return {}
     if not isinstance(doc, dict):
         raise ValueError(f"profile must be a mapping: {path}")
     return doc

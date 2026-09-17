@@ -9,7 +9,14 @@ from datetime import datetime
 from pathlib import Path
 
 from rip_swarm.claim import ClaimDenied, complete, heartbeat, reject, release
-from rip_swarm.gitops import GitopsError, NotHiveRepo, assert_hive_repo, publish, upstream
+from rip_swarm.gitops import (
+    DirtyHive,
+    GitopsError,
+    NotHiveRepo,
+    assert_hive_repo,
+    publish,
+    upstream,
+)
 from rip_swarm.inbox import create_task
 from rip_swarm.init_hive import init_hive
 from rip_swarm.lookback import write_lookback
@@ -28,6 +35,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ClaimDenied as e:
         print(e, file=sys.stderr)
         return 2
+    except DirtyHive as e:
+        print(f"{e}\n{_dirty_hint(_hive_for_hint(args))}", file=sys.stderr)
+        return 1
     except Exception as e:
         print(e, file=sys.stderr)
         return 1
@@ -52,7 +62,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    init_p = sub.add_parser("init", parents=[common], help="bootstrap or attach the swarm hive")
+    init_p = sub.add_parser("init", help="bootstrap or attach the swarm hive")
+    init_p.add_argument("--hive")
     init_p.add_argument("--force", action="store_true")
     init_p.add_argument("--no-git", action="store_true")
 
@@ -93,11 +104,17 @@ def _parser() -> argparse.ArgumentParser:
 def _dispatch(args: argparse.Namespace) -> object:
     if args.command == "init":
         dest = _init_dest(args.hive)
-        return init_hive(dest, force=args.force, git_init=not args.no_git)
+        status = init_hive(dest, force=args.force, git_init=not args.no_git)
+        return _init_message(status, dest)
 
     hive = resolve_hive(args.hive)
     now = now_utc()
+    if getattr(args, "local", False) and _hive_can_publish(hive):
+        _warn_local_on_publishable(hive)
     if args.command == "status":
+        # Resolve the profile the same way every other command does so an
+        # unknown --profile behaves consistently (profile.py falls back).
+        load_profile(hive, args.profile)
         return format_status(status_report(hive, now))
     if args.command == "lookback":
         return _lookback(args, hive, now)
@@ -176,8 +193,6 @@ def _lookback(args: argparse.Namespace, hive: Path, now: datetime) -> str:
 
 def _claim(args: argparse.Namespace, hive: Path, now: datetime, profile: dict) -> dict:
     task_id = _require(args.task, "--task")
-    if task_id == "orchestrator":
-        raise ClaimDenied("orchestrator baton is acquired with promote, not claim")
     agent = _require(args.agent, "--agent")
     harness = _require(args.harness, "--harness")
 
@@ -357,6 +372,43 @@ def _run_op(
         if captured.get("doc") is not None and "nothing to commit" in str(e).lower():
             return captured["doc"]
         raise
+
+
+def _init_message(status: str, dest: Path) -> str:
+    if status == "bootstrapped":
+        return f"bootstrapped hive at {dest} (created origin/swarm)"
+    if status == "attached":
+        return f"attached hive at {dest} from origin/swarm"
+    if status == "copied":
+        return f"copied template to {dest}"
+    return f"{status} hive at {dest}"
+
+
+def _hive_for_hint(args: argparse.Namespace) -> Path:
+    """Best-effort hive path for an error hint; never raises over the real error."""
+    try:
+        return resolve_hive(getattr(args, "hive", None))
+    except Exception:
+        return Path(getattr(args, "hive", None) or "_swarm")
+
+
+def _dirty_hint(hive: Path) -> str:
+    return (
+        "The hive work-tree has uncommitted changes, so nothing can be published.\n"
+        f"Inspect them with:  git -C {hive} status\n"
+        "then commit them or discard them (git -C "
+        f"{hive} checkout -- . ; git -C {hive} clean -fd) and retry."
+    )
+
+
+def _warn_local_on_publishable(hive: Path) -> None:
+    print(
+        f"warning: --local skips git on a publishable hive at {hive}.\n"
+        "It leaves the work-tree dirty, which blocks every later publish.\n"
+        f"Inspect with:  git -C {hive} status\n"
+        "then commit or discard those changes before publishing again.",
+        file=sys.stderr,
+    )
 
 
 def _hive_can_publish(hive: Path) -> bool:

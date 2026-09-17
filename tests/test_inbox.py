@@ -32,6 +32,37 @@ class TestInbox(unittest.TestCase):
         with self.assertRaises(InboxError):
             create_task(self.hive, title="  ", created_by="op")
 
+    def test_explicit_valid_task_id_accepted(self):
+        tid = "task_01J00000000000000000000000"
+        doc = create_task(self.hive, title="A", created_by="op", task_id=tid)
+        self.assertEqual(doc["id"], tid)
+        self.assertTrue((self.hive / "inbox" / f"{tid}.json").is_file())
+
+    def test_bad_task_ids_rejected(self):
+        bad = [
+            "",
+            "   ",
+            "nope",
+            "task_",
+            "task_01J0000000000000000000000",      # 25 chars
+            "task_01J000000000000000000000000",    # 27 chars
+            "task_01j00000000000000000000000",     # lowercase
+            "task_01I00000000000000000000000",     # I not in Crockford
+            "task_01L00000000000000000000000",     # L not in Crockford
+            "task_01O00000000000000000000000",     # O not in Crockford
+            "task_01U00000000000000000000000",     # U not in Crockford
+            "task_01J00000000000000000000000\n",
+            "../task_01J00000000000000000000000",
+            "task_01J00000000000000000000000/x",
+            "orchestrator",
+            "CURRENT",
+        ]
+        for tid in bad:
+            with self.subTest(tid=tid):
+                with self.assertRaises(InboxError):
+                    create_task(self.hive, title="A", created_by="op", task_id=tid)
+        self.assertFalse(any((self.hive / "inbox").glob("*")) if (self.hive / "inbox").is_dir() else False)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,19 +5,21 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from rip_swarm.fold import Expired, Holder, active_holder
+from rip_swarm.fold import Corrupt, Expired, Holder, active_holder
 from rip_swarm.orchestrator import orchestrator_state
 from rip_swarm.paths import HivePaths
 from rip_swarm.registry import load_registry
 from rip_swarm.timeutil import format_z
 
-_ACTIVE_JSON = re.compile(r"^[^.]+\.json$")
+_ACTIVE_JSON = re.compile(r"[^.]+\.json")
 
 
 def status_report(hive: Path, now: datetime) -> dict:
     state = orchestrator_state(hive, now)
-    holders, expired_ids, claim_agents = _scan_claims(hive, now)
+    holders, expired_ids, claim_agents, corrupt = _scan_claims(hive, now)
     known = {agent["id"] for agent in load_registry(hive)}
+    # The baton is reported under "orchestrator"; don't double-list it as work.
+    task_holders = [rec for rec in holders if rec.task_id != "orchestrator"]
     return {
         "orchestrator": {
             "agent": state["agent"],
@@ -30,10 +32,16 @@ def status_report(hive: Path, now: datetime) -> dict:
                 "agent": rec.agent,
                 "expires_at": format_z(rec.expires_at),
             }
-            for rec in holders
+            for rec in task_holders
         ],
-        "inbox_without_claim": _inbox_without_claim(hive, {rec.task_id for rec in holders}),
+        "inbox_without_claim": _inbox_without_claim(
+            hive, {rec.task_id for rec in holders}
+        ),
         "expired_claim_files": expired_ids,
+        "corrupt_claims": [
+            {"task_id": rec.task_id, "path": _rel(hive, rec.path), "error": rec.error}
+            for rec in corrupt
+        ],
         "jsonl_parse_errors": _jsonl_parse_errors(hive),
         "unknown_agents": sorted(agent for agent in claim_agents if agent not in known),
         "current_mismatch": not state["matches_claim"],
@@ -66,6 +74,12 @@ def format_status(report: dict) -> str:
     else:
         lines.append("  (none)")
     _section(lines, "unknown_agents", report["unknown_agents"])
+    lines.append("corrupt_claims:")
+    if report.get("corrupt_claims"):
+        for rec in report["corrupt_claims"]:
+            lines.append(f"  {rec['task_id']} ({rec['path']}): {rec['error']}")
+    else:
+        lines.append("  (none)")
     return "\n".join(lines) + "\n"
 
 
@@ -79,15 +93,16 @@ def _section(lines: list[str], title: str, items: list[str]) -> None:
 
 def _scan_claims(
     hive: Path, now: datetime
-) -> tuple[list[Holder], list[str], set[str]]:
+) -> tuple[list[Holder], list[str], set[str], list[Corrupt]]:
     claims_dir = HivePaths(hive).claims
     holders: list[Holder] = []
     expired_ids: list[str] = []
     agents: set[str] = set()
+    corrupt: list[Corrupt] = []
     if not claims_dir.is_dir():
-        return holders, expired_ids, agents
+        return holders, expired_ids, agents, corrupt
     for path in sorted(claims_dir.glob("*.json"), key=lambda p: p.name):
-        if _ACTIVE_JSON.match(path.name) is None:
+        if _ACTIVE_JSON.fullmatch(path.name) is None:
             continue
         rec = active_holder(hive, path.stem, now)
         if isinstance(rec, Holder):
@@ -96,20 +111,33 @@ def _scan_claims(
         elif isinstance(rec, Expired):
             expired_ids.append(rec.task_id)
             agents.add(rec.agent)
+        elif isinstance(rec, Corrupt):
+            corrupt.append(rec)
     holders.sort(key=lambda rec: rec.task_id)
     expired_ids.sort()
-    return holders, expired_ids, agents
+    corrupt.sort(key=lambda rec: rec.task_id)
+    return holders, expired_ids, agents, corrupt
+
+
+def _completed_task_ids(hive: Path) -> set[str]:
+    """Tasks with a `complete` tombstone are done, not unattended. A `reject`
+    tombstone means nobody took the work, so the task stays listed."""
+    claims = HivePaths(hive).claims
+    if not claims.is_dir():
+        return set()
+    return {path.name.split(".", 1)[0] for path in claims.glob("*.complete.*.json")}
 
 
 def _inbox_without_claim(hive: Path, held: set[str]) -> list[str]:
     inbox = HivePaths(hive).inbox
     if not inbox.is_dir():
         return []
+    settled = held | _completed_task_ids(hive)
     missing: list[str] = []
     for path in inbox.glob("*.json"):
-        if _ACTIVE_JSON.match(path.name) is None:
+        if _ACTIVE_JSON.fullmatch(path.name) is None:
             continue
-        if path.stem not in held:
+        if path.stem not in settled:
             missing.append(path.stem)
     missing.sort()
     return missing

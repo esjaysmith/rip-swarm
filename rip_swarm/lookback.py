@@ -15,13 +15,29 @@ _TOMBSTONE = frozenset({"expired", "complete", "release", "reject"})
 def write_lookback(hive: Path, now: datetime, profile: dict | None = None) -> Path:
     hive = Path(hive)
     cfg = _lookback_cfg(profile)
-    write_dir = hive / str(cfg["write_dir"])
+    write_dir = _resolve_write_dir(hive, str(cfg["write_dir"]))
     write_dir.mkdir(parents=True, exist_ok=True)
     day = _day(now)
     path = _next_report_path(write_dir, day)
     report = status_report(hive, now)
     path.write_text(_render(hive, day, report, cfg), encoding="utf-8")
     return path
+
+
+def _resolve_write_dir(hive: Path, write_dir: str) -> Path:
+    """`write_dir` is relative to the hive root (section 9) and must stay inside it.
+
+    A profile is operator-owned but still a config file: an absolute path or a
+    `../` escape would let a lookback run write anywhere on the machine.
+    """
+    candidate = Path(write_dir)
+    if candidate.is_absolute():
+        raise ValueError(f"lookback write_dir must be relative to the hive: {write_dir!r}")
+    root = hive.resolve()
+    resolved = (root / candidate).resolve()
+    if resolved != root and root not in resolved.parents:
+        raise ValueError(f"lookback write_dir escapes the hive: {write_dir!r}")
+    return resolved
 
 
 def _lookback_cfg(profile: dict | None) -> dict:

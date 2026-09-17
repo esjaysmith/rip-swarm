@@ -28,7 +28,13 @@ def load_registry(hive: Path) -> list[dict]:
         return []
     if not isinstance(doc, list):
         raise RegistryError("registry must be a list of agents")
-    return [_check_agent(item) for item in doc]
+    agents = [_check_agent(item) for item in doc]
+    seen: set[str] = set()
+    for agent in agents:
+        if agent["id"] in seen:
+            raise RegistryError(f"duplicate agent id: {agent['id']!r}")
+        seen.add(agent["id"])
+    return agents
 
 
 def require_agent(hive: Path, agent_id: str) -> dict:
