@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rip-swarm.local/schema/current.schema.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["agent", "harness", "lease_expires_at", "reason", "claim_id"],
+  "properties": {
+    "agent": {"type": "string"},
+    "harness": {"type": "string"},
+    "lease_expires_at": {"type": "string", "pattern": "Z$"},
+    "reason": {"type": "string"},
+    "claim_id": {"type": "string", "pattern": "^clm_"}
+  }
+}

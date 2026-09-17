@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rip-swarm.local/schema/claim-audit.schema.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["claim_id", "ts", "action", "task_id", "agent", "harness", "expires_at"],
+  "properties": {
+    "claim_id": {"type": "string", "pattern": "^clm_"},
+    "ts": {"type": "string", "pattern": "Z$"},
+    "action": {
+      "type": "string",
+      "enum": ["claim", "heartbeat", "complete", "release", "reject", "expired"]
+    },
+    "task_id": {"type": "string"},
+    "agent": {"type": "string"},
+    "harness": {"type": "string"},
+    "expires_at": {"type": "string", "pattern": "Z$"},
+    "result_ref": {"type": ["string", "null"]},
+    "note": {"type": ["string", "null"]}
+  }
+}

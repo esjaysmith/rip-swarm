@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rip-swarm.local/schema/message.schema.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["id", "ts", "type", "topic", "from", "to", "body", "profile"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^msg_"},
+    "ts": {"type": "string", "pattern": "Z$"},
+    "type": {
+      "type": "string",
+      "enum": ["task", "result", "ops", "promote", "budget_block", "note", "heartbeat"]
+    },
+    "topic": {"type": "string", "enum": ["tasks", "ops", "results"]},
+    "from": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["agent", "harness"],
+      "properties": {
+        "agent": {"type": "string"},
+        "harness": {"type": "string"}
+      }
+    },
+    "to": {"type": "string"},
+    "body": {"type": "object"},
+    "profile": {"type": "string"}
+  }
+}

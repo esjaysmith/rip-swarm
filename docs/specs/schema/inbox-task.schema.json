@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rip-swarm.local/schema/inbox-task.schema.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["id", "title", "created_at", "created_by"],
+  "properties": {
+    "id": {"type": "string"},
+    "title": {"type": "string"},
+    "created_at": {"type": "string", "pattern": "Z$"},
+    "created_by": {"type": "string"},
+    "body": {"type": ["string", "null"]}
+  }
+}
