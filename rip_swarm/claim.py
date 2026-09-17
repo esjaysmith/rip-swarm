@@ -16,7 +16,11 @@ class ClaimError(Exception):
 
 
 class ClaimDenied(ClaimError):
-    pass
+    """Refusal. commit=True: op wrote audit that publish should push, then re-raise."""
+
+    def __init__(self, message: str = "", *, commit: bool = False):
+        super().__init__(message)
+        self.commit = commit
 
 
 def _stamp(now: datetime) -> str:
@@ -105,6 +109,8 @@ def complete(
     result_ref: str,
     note: str | None = None,
 ) -> dict:
+    if task_id == "orchestrator":
+        raise ClaimDenied("orchestrator cannot be completed; use release")
     if not result_ref or not result_ref.strip():
         raise ClaimDenied("complete requires result_ref")
     path, doc = _require_holder(hive, task_id, agent, now)
@@ -130,6 +136,8 @@ def release(hive: Path, task_id: str, agent: str, now: datetime, note: str | Non
 
 
 def reject(hive: Path, task_id: str, agent: str, now: datetime, note: str | None = None) -> dict:
+    if task_id == "orchestrator":
+        raise ClaimDenied("orchestrator cannot be rejected; use release")
     path, doc = _require_holder(hive, task_id, agent, now)
     if note is not None:
         doc = dict(doc)

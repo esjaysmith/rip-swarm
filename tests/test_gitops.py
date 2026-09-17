@@ -153,5 +153,168 @@ class TestGitops(unittest.TestCase):
         with self.assertRaises(DirtyHive):
             claim_and_publish(self.ha, task_id=self.task["id"], agent="alice", harness="h", now=T0, lease_seconds=1)
 
+    def test_failed_op_resets_hive(self):
+        before = (self.ha / "agents" / "registry.yaml").read_text(encoding="utf-8")
+
+        def op():
+            (self.ha / "scratch.txt").write_text("x", encoding="utf-8")
+            (self.ha / "agents" / "registry.yaml").write_text(before + "# dirt\n", encoding="utf-8")
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            publish(self.ha, task_id="__none__", op=op, message="x")
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+        self.assertFalse((self.ha / "scratch.txt").exists())
+        self.assertEqual((self.ha / "agents" / "registry.yaml").read_text(encoding="utf-8"), before)
+
+    def test_cap_denial_publishes_audit_and_leaves_hive_clean(self):
+        from rip_swarm.claim import complete, heartbeat
+        from rip_swarm.policy import try_claim_with_policy
+
+        claim_and_publish(
+            self.ha, task_id=self.task["id"], agent="alice", harness="claude-code",
+            now=T0, lease_seconds=900,
+        )
+
+        def add_task():
+            return create_task(self.ha, title="U", created_by="op", now=T0)
+
+        t2 = publish(self.ha, task_id="__none__", op=add_task, message="inbox-add U")
+        profile = {
+            "worker_lease_ttl": "15m",
+            "orchestrator_lease_ttl": "30m",
+            "budget": {"max_claims_open_per_agent": 1},
+        }
+
+        def op():
+            return try_claim_with_policy(
+                self.ha,
+                task_id=t2["id"],
+                agent="alice",
+                harness="claude-code",
+                now=T0,
+                profile=profile,
+            )
+
+        with self.assertRaises(ClaimDenied):
+            publish(
+                self.ha,
+                task_id=t2["id"],
+                op=op,
+                message=f"claim {t2['id']}",
+                agent="alice",
+                now=T0,
+            )
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+        remote_msg = subprocess.check_output(
+            ["git", "-C", str(self.ha), "show", "origin/swarm:store/messages.jsonl"],
+            text=True,
+        )
+        self.assertIn("budget_block", remote_msg)
+        self.assertFalse((self.ha / "claims" / f"{t2['id']}.json").exists())
+        publish(
+            self.ha,
+            task_id=self.task["id"],
+            message="heartbeat",
+            op=lambda: heartbeat(self.ha, self.task["id"], "alice", T0, 900),
+            agent="alice",
+            now=T0,
+        )
+        publish(
+            self.ha,
+            task_id=self.task["id"],
+            message="complete",
+            op=lambda: complete(self.ha, self.task["id"], "alice", T0, "out"),
+            agent="alice",
+            now=T0,
+        )
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+
+    def test_lookback_then_claim_and_publish(self):
+        from rip_swarm.lookback import write_lookback
+
+        def op():
+            path = write_lookback(self.ha, T0)
+            return {"path": str(path)}
+
+        publish(self.ha, task_id="__none__", op=op, message="lookback")
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+        claim_and_publish(
+            self.ha, task_id=self.task["id"], agent="alice", harness="claude-code",
+            now=T0, lease_seconds=900,
+        )
+
+    def test_unexpired_held_by_other_expired_is_stealable(self):
+        from rip_swarm.gitops import _unexpired_held_by_other
+
+        expired = {"agent": "alice", "expires_at": "2026-09-17T09:00:00Z"}
+        live = {"agent": "alice", "expires_at": "2026-09-17T10:00:00Z"}
+        self.assertFalse(_unexpired_held_by_other(expired, "bob", T0))
+        self.assertTrue(_unexpired_held_by_other(live, "bob", T0))
+        self.assertFalse(_unexpired_held_by_other(live, "alice", T0))
+
+    def test_expired_foreign_claim_rebases_after_rejected_push(self):
+        from rip_swarm import gitops
+        from rip_swarm.timeutil import add_seconds
+
+        claim_and_publish(
+            self.ha, task_id=self.task["id"], agent="alice", harness="claude-code",
+            now=T0, lease_seconds=1,
+        )
+        later = add_seconds(T0, 2)
+        real_run = gitops._run
+        injected = {"done": False}
+
+        def wrapped(hive, *args, check=True):
+            hive_p = Path(hive).resolve()
+            if hive_p == self.hb.resolve() and args[:1] == ("push",) and not injected["done"]:
+                injected["done"] = True
+
+                def op_a():
+                    return write_message(
+                        self.ha,
+                        agent="alice",
+                        harness="claude-code",
+                        type="ops",
+                        to="*",
+                        body={"text": "jsonl only"},
+                        now=later,
+                    )
+
+                gitops.publish(self.ha, task_id="__none__", op=op_a, message="msg a")
+            return real_run(hive, *args, check=check)
+
+        gitops._run = wrapped
+        try:
+            claim_and_publish(
+                self.hb,
+                task_id=self.task["id"],
+                agent="bob",
+                harness="codex",
+                now=later,
+                lease_seconds=900,
+            )
+        finally:
+            gitops._run = real_run
+
+        self.assertTrue(injected["done"])
+        self.assertEqual(read_json(self.hb / "claims" / f"{self.task['id']}.json")["agent"], "bob")
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.hb, text=True),
+            "",
+        )
+
 if __name__ == "__main__":
     unittest.main()

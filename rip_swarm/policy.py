@@ -46,6 +46,7 @@ def try_claim_with_policy(
                 now=now,
             )
             raise ClaimDenied(
-                f"max_claims_open_per_agent: {observed} >= {limit}"
+                f"max_claims_open_per_agent: {observed} >= {limit}",
+                commit=True,
             )
     return try_claim(hive, task_id, agent, harness, now, lease_seconds, note)

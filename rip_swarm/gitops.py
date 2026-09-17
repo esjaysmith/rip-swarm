@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from datetime import datetime
 from pathlib import Path
 
@@ -112,8 +113,47 @@ def _fetch(hive: Path) -> None:
     _run(hive, "fetch")
 
 
+def _iter_porcelain_z(raw: str) -> Iterator[tuple[str, str, str | None]]:
+    parts = raw.split("\0")
+    i = 0
+    while i < len(parts):
+        item = parts[i]
+        if not item:
+            i += 1
+            continue
+        xy = item[:2]
+        path = item[3:] if len(item) > 3 else ""
+        extra = None
+        if "R" in xy or "C" in xy:
+            i += 1
+            extra = parts[i] if i < len(parts) else ""
+        yield xy, path, extra
+        i += 1
+
+
+def _untracked_relpaths(hive: Path) -> list[str]:
+    raw = _run(hive, "status", "-z", "--porcelain", "-uall").stdout
+    return [path for xy, path, _extra in _iter_porcelain_z(raw) if xy == "??"]
+
+
+def _drop_untracked(hive: Path) -> None:
+    hive = hive.resolve()
+    for rel in _untracked_relpaths(hive):
+        path = (hive / rel).resolve()
+        try:
+            path.relative_to(hive)
+        except ValueError:
+            continue
+        if path.is_symlink() or path.is_file():
+            path.unlink()
+        elif path.is_dir():
+            shutil.rmtree(path)
+
+
 def _reset_upstream(hive: Path) -> None:
+    # reset --hard does not remove untracked files the failed op created.
     _run(hive, "reset", "--hard", "@{u}")
+    _drop_untracked(hive)
 
 
 def _read_remote_claim(hive: Path, task_id: str) -> dict | None:
@@ -170,8 +210,39 @@ def _ff_only(hive: Path) -> None:
 
 
 def _commit_op(hive: Path, message: str) -> None:
-    _run(hive, "add", "-A")
+    _run(hive, "add", "-u")
+    untracked = _untracked_relpaths(hive)
+    if untracked:
+        _run(hive, "add", "--", *untracked)
     _run(hive, "commit", "-m", message)
+
+
+def _push_with_retries(
+    hive: Path,
+    *,
+    task_id: str,
+    agent: str | None,
+    now: datetime | None,
+    max_attempts: int,
+) -> None:
+    for attempt in range(max_attempts):
+        pushed = _run(hive, "push", check=False)
+        if pushed.returncode == 0:
+            return
+        _fetch(hive)
+        if _unexpired_held_by_other(_read_remote_claim(hive, task_id), agent, now):
+            _reset_upstream(hive)
+            raise ClaimDenied("lost race on remote tip")
+        if attempt >= max_attempts - 1:
+            _reset_upstream(hive)
+            raise GitopsError("push rejected after max attempts")
+        rebased = _run(hive, "rebase", "@{u}", check=False)
+        if rebased.returncode != 0:
+            _run(hive, "rebase", "--abort", check=False)
+            _reset_upstream(hive)
+            raise GitopsError("rebase onto upstream failed")
+    _reset_upstream(hive)
+    raise GitopsError("push rejected after max attempts")
 
 
 def publish(
@@ -202,26 +273,40 @@ def publish(
         raise ClaimDenied("lost race on remote tip")
 
     _ff_only(hive)
-    doc = op()
-    _commit_op(hive, message)
+    denial: ClaimDenied | None = None
+    try:
+        doc = op()
+    except ClaimDenied as e:
+        if not e.commit:
+            _reset_upstream(hive)
+            raise
+        denial = e
+        doc = {}
+    except Exception:
+        _reset_upstream(hive)
+        raise
 
-    for attempt in range(max_attempts):
-        pushed = _run(hive, "push", check=False)
-        if pushed.returncode == 0:
-            return doc
-        _fetch(hive)
-        if _held_by_other(_read_remote_claim(hive, task_id), agent):
-            _reset_upstream(hive)
-            raise ClaimDenied("lost race on remote tip")
-        if attempt >= max_attempts - 1:
-            _reset_upstream(hive)
-            raise GitopsError("push rejected after max attempts")
-        rebased = _run(hive, "rebase", "@{u}", check=False)
-        if rebased.returncode != 0:
-            _run(hive, "rebase", "--abort", check=False)
-            _reset_upstream(hive)
-            raise GitopsError("rebase onto upstream failed")
-    raise GitopsError("push rejected after max attempts")
+    try:
+        if not _out(hive, "status", "--porcelain"):
+            if denial is not None:
+                raise denial
+            raise GitopsError("nothing to commit")
+        _commit_op(hive, message)
+        _push_with_retries(
+            hive,
+            task_id=task_id,
+            agent=agent,
+            now=now,
+            max_attempts=max_attempts,
+        )
+    except ClaimDenied:
+        raise
+    except Exception:
+        _reset_upstream(hive)
+        raise
+    if denial is not None:
+        raise denial
+    return doc
 
 
 def claim_and_publish(
