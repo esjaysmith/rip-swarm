@@ -7,7 +7,7 @@
 
 ## 0. One-sentence model
 
-A **git-backed hive** (folders + house rules on a dedicated **`swarm` branch of the project repo**, mounted as a worktree at `_swarm/`) is the coordination board; agents take work with **create-only claim files** (OpenMOSS-inspired leases; JSONL is audit, not the lock); install/update is an **Agent Skills / skills.sh-class skill**; site prefs live in **profiles** (with a default); `/lookback` reads the store and proposes coordination improvements.
+A **git-backed hive** (folders + house rules on a dedicated **`swarm` branch of the project repo**, cloned single-branch into `_swarm/`) is the coordination board; agents take work with **create-only claim files** (OpenMOSS-inspired leases; JSONL is audit, not the lock); install/update is an **Agent Skills / skills.sh-class skill**; site prefs live in **profiles** (with a default); `/lookback` reads the store and proposes coordination improvements.
 
 No hosted queue is required for v0. The hive directory *is* the board. Multi-harness `git push` is a **known-weaker** concurrency model than munder’s single-committer house — exclusivity comes from create-only claim paths whose first push wins, not from shared JSONL earliest-wins.
 
@@ -18,7 +18,7 @@ No hosted queue is required for v0. The hive directory *is* the board. Multi-har
 | Pillar | Name | Lock |
 |--------|------|------|
 | **A** | Install / update | Agent Skills `SKILL.md` installable via skills.sh-class CLIs (`npx skills` / equivalent). One *skill package*; harness invocation still differs (slash vs “ask the agent”). Not “one marketplace pin already chosen.” |
-| **B** | Hive house | **munder-shaped layout names + PROTOCOL.md**, deliberately **not** munder concurrency. Munder: single committer, per-agent outbox, no co-edited mailbox. rip-swarm: multi-harness push allowed; writes use create-only / per-agent paths where races matter; shared append-only logs merge with git `merge=union`. The hive lives on its **own branch and own worktree** (`swarm` → `_swarm/`) so helpers can run git on it without touching code branches or the developer’s working tree. Document the fork — do not claim “we are a munder house.” |
+| **B** | Hive house | **munder-shaped layout names + PROTOCOL.md**, deliberately **not** munder concurrency. Munder: single committer, per-agent outbox, no co-edited mailbox. rip-swarm: multi-harness push allowed; writes use create-only / per-agent paths where races matter; shared append-only logs merge with git `merge=union`. The hive lives on its **own branch in its own checkout** (`origin/swarm` → nested clone at `_swarm/`) so helpers can run git on it without touching code branches or the developer’s working tree. Document the fork — do not claim “we are a munder house.” |
 | **C** | Claims | **Inspired by OpenMOSS leases, not a fork of OpenMOSS JSONL-as-claim.** Exclusivity = create-only file `claims/<task_id>.json` (`O_CREAT\|O_EXCL` locally; first push to the hive remote wins). `store/claims.jsonl` is append-only **audit**. Claim success = your claim file is on the **remote tip** (push accepted) before any project mutation. |
 | **D** | Profiles | User/site preferences under `profiles/`. Missing override → **`profiles/default.yaml`**. Deep-merge; lists **replace** (not concat) unless a key documents otherwise. |
 | **E** | Slash cmds | Few only. Required: **`/lookback`** (alias `/evaluate`). v0 also ships **`/status`** (read-only fold). **No `/promote` slash command in v0** — promote is a helper call governed by PROTOCOL. |
@@ -51,23 +51,27 @@ Prior queue shapes (CF Queues, Redis Streams, HTTP board, Omnigent) remain **fut
 
 ## 3. Repo / hive layout
 
-**Each project that needs cooperation carries its own hive, on a dedicated branch.** The hive is an **orphan branch named `swarm`** in the project repository, pushed to the project’s normal remote (`origin/swarm`), and checked out locally as a **linked git worktree** at **`<repo>/_swarm/`**. Code branches list `_swarm/` in `.gitignore` so the directory is never committed onto `main` or a feature branch. The remote therefore holds the complete hive contents and history (`git log origin/swarm`, `git show origin/swarm:store/claims.jsonl`) without anything extra to host.
+**Each project that needs cooperation carries its own hive, on a dedicated branch.** The hive is an **orphan branch named `swarm`** in the project repository, pushed to the project’s normal remote (`origin/swarm`), and checked out locally as a **nested single-branch clone** at **`<repo>/_swarm/`** (`git clone --single-branch -b swarm <origin-url> _swarm`). Code branches list `_swarm/` in `.gitignore` so the directory is never committed onto `main` or a feature branch. The remote therefore holds the complete hive contents and history (`git log origin/swarm`, `git show origin/swarm:store/claims.jsonl`) without anything extra to host.
 
-Helpers refuse to run git operations unless the hive directory **is** a git work-tree root (`git rev-parse --show-toplevel` == hive dir) with an upstream. A linked worktree satisfies this; so does a separate sibling repository, which remains the option for multi-repo products. Path override: `RIP_SWARM_HIVE` / `--hive`; default `./_swarm`.
+Helpers refuse to run git operations unless the hive directory **is** a git work-tree root (`git rev-parse --show-toplevel` == hive dir) with an upstream. The nested clone satisfies this; so do a linked `git worktree` of `swarm` (permitted, not required) and a separate sibling clone of the same remote, which remains the option for multi-repo products. Path override: `RIP_SWARM_HIVE` / `--hive`; default `./_swarm`.
 
-Why a separate branch and worktree, not hive files on the code branch: (1) coordination state must be on exactly one shared line of history, while agents work on feature branches; (2) heartbeats and claims must push while the agent’s code tree is dirty, which `pull --rebase` on the code branch refuses; (3) lost-race recovery uses `reset --hard`, which inside the code worktree would destroy uncommitted work. In the `_swarm/` worktree it only ever touches hive files.
+Why a separate branch and checkout, not hive files on the code branch: (1) coordination state must be on exactly one shared line of history, while agents work on feature branches; (2) heartbeats and claims must push while the agent’s code tree is dirty, which `pull --rebase` on the code branch refuses; (3) lost-race recovery uses `reset --hard`, which inside the code checkout would destroy uncommitted work. Inside `_swarm/` it only ever touches hive files.
+
+Why a nested clone rather than a linked worktree (see `docs/specs/2026-09-17-hive-checkout.md`): no git ≥ 2.42 requirement, no absolute-path worktree metadata that breaks when the project moves, no `worktree prune` debt, and git run inside `_swarm/` can only ever see the hive, never the project repository.
 
 ```bash
-# first agent on a project (init does this)
-git worktree add --orphan -b swarm _swarm     # git ≥ 2.42
+# first agent on a project (init does this; the code checkout is never touched)
+tmp=$(mktemp -d) && git init -q -b swarm "$tmp"
+cp -r "$SKILL_DIR/templates/_swarm/." "$tmp" && git -C "$tmp" add -A && git -C "$tmp" commit -qm "init hive"
+git -C "$tmp" push -q "$(git remote get-url origin)" swarm && rm -rf "$tmp"
 echo '_swarm/' >> .gitignore
-git -C _swarm push -u origin swarm
+git clone -q --single-branch -b swarm "$(git remote get-url origin)" _swarm
 # every later clone (init attaches when origin/swarm exists)
-git worktree add --track -b swarm _swarm origin/swarm
+git clone -q --single-branch -b swarm "$(git remote get-url origin)" _swarm
 ```
 
 ```text
-_swarm/                       # linked worktree of branch `swarm` (work-tree root)
+_swarm/                       # nested single-branch clone of `swarm` (work-tree root)
   .gitattributes              # store/*.jsonl merge=union
   PROTOCOL.md
   profiles/
@@ -105,6 +109,7 @@ rip-swarm/
   docs/
     specs/
       2026-09-17-design-spec.md
+      2026-09-17-hive-checkout.md
       schema/                 # JSON Schema once frozen post-spike
     plans/
       2026-09-17-rip-swarm.md
@@ -280,7 +285,7 @@ JSONL is **not** consulted for exclusivity. Earliest-wins-on-JSONL is **removed*
 2. Exclusivity = create-only claim file whose commit reaches the remote tip first; the loser does not start work.
 3. Prefer unique ids (ULID) for all new files. Claim files and inbox files never get `merge=union`: an add/add conflict on them means you lost.
 4. Promote = claim on `orchestrator` + CURRENT + promote message in one commit.
-5. **Publish procedure (helpers):** require a clean hive work-tree → `git fetch` → check the remote tip for `claims/<task_id>.json` → run the local operation → commit only the paths written → `git push`. On rejection: `git fetch`; if the remote tip now has that claim file held by someone else, `git reset --hard @{u}` and report *lost race*; otherwise `git rebase @{u}` (union merge handles JSONL) and push again. At most 5 attempts, then stop and report. `reset --hard` is safe only because the hive is its own worktree on its own branch and that tree was clean.
+5. **Publish procedure (helpers):** require a clean hive work-tree → `git fetch` → check the remote tip for `claims/<task_id>.json` → run the local operation → commit only the paths written → `git push`. On rejection: `git fetch`; if the remote tip now has that claim file held by someone else, `git reset --hard @{u}` and report *lost race*; otherwise `git rebase @{u}` (union merge handles JSONL) and push again. At most 5 attempts, then stop and report. `reset --hard` is safe only because the hive is its own checkout on its own branch and that tree was clean.
 6. Never force-push the hive.
 7. No silent steal of unexpired claims. `allow_preempt` is reserved for a later version: v0 helpers ignore it and never preempt. Expired: rename to `expired` then create (helper).
 8. Leases use each machine’s clock in UTC. Assume skew under one minute; heartbeat at or before half the lease.
@@ -338,7 +343,7 @@ Portable skill also triggers on description keywords (`lookback`, hive, claims) 
 - `SKILL.md` with YAML `name` + `description`; `name` matches parent directory after install.
 - Install via Agent Skills / skills.sh-class CLIs — exact marketplace row TBD (Researcher).
 - Do not claim plugin-subscribe and `npx skills add` are the same surface; document both if both matter.
-- `init` (run from inside the project repo): if `origin/swarm` already exists, **attach** — `git worktree add --track -b swarm _swarm origin/swarm` and stop (the hive is already initialized). Otherwise **scaffold** — `git worktree add --orphan -b swarm _swarm`, copy `templates/_swarm` in, commit `init hive`, and append `_swarm/` to the project’s `.gitignore` if missing; the operator then runs `git -C _swarm push -u origin swarm`. Refuse to clobber an existing `PROTOCOL.md` / `profiles/` unless `--force`. `--no-git` copies the template only (tests, or a sibling repo the operator manages). Old git without `worktree add --orphan`: `worktree add --detach` then `checkout --orphan swarm` and clear the tree.
+- `init` (run from inside the project repo): read the remote URL with `git remote get-url origin`. If `origin/swarm` already exists (`git ls-remote --heads`), **attach** — `git clone --single-branch -b swarm <url> _swarm` and stop (the hive is already initialized). Otherwise **bootstrap** — in a temporary directory `git init -b swarm`, copy `templates/_swarm` in, commit `init hive`, push it to `<url> swarm`, delete the temp dir, then attach as above. In both cases append `_swarm/` to the project’s `.gitignore` if missing (left uncommitted for the operator). The project’s code checkout, index, and stash are never touched. Refuse to clobber an existing `_swarm/` unless `--force`. `--no-git` copies the template only (tests, or a checkout the operator manages). Bootstrap needs push rights to the remote; without them, init reports the manual steps.
 - Scripts run from any cwd: each `scripts/*.py` inserts its own skill directory into `sys.path` before importing `rip_swarm`.
 
 ---
@@ -375,14 +380,15 @@ Portable skill also triggers on description keywords (`lookback`, hive, claims) 
 | 2026-09-17 | **`/promote`:** not a v0 slash command. Promote via helper + PROTOCOL (claim `orchestrator`). |
 | 2026-09-17 | **On-disk name:** each hive checkout is a directory named `_swarm/` (not `hive/`). `RIP_SWARM_HIVE` / `--hive` still name the path; default is `./_swarm`. |
 | 2026-09-17 | **Docs layout:** `docs/specs/` for design specs + JSON Schema; `docs/plans/` for implementation plans. No `docs/superpowers/`. |
-| 2026-09-17 | **Hive = `swarm` branch + `_swarm/` worktree** (review 2, R1; operator lock after discussion): the hive is an orphan branch of the project repo, pushed to the project remote, mounted as a linked worktree at `_swarm/`, gitignored on code branches. Helpers refuse git ops unless the hive dir is a work-tree root with an upstream. A sibling separate repo is the multi-repo option. The remote holds full hive contents + history for analysis. Resolves §16 Q1. |
+| 2026-09-17 | **Hive = `swarm` branch + nested clone at `_swarm/`** (review 2, R1; operator lock after discussion): the hive is an orphan branch of the project repo, pushed to the project remote, gitignored on code branches. Helpers refuse git ops unless the hive dir is a work-tree root with an upstream. A sibling clone of the same remote is the multi-repo option. The remote holds full hive contents + history for analysis. Resolves §16 Q1. |
+| 2026-09-17 | **Checkout mechanism = nested single-branch clone, option C** of `docs/specs/2026-09-17-hive-checkout.md`: default create/attach is `git clone --single-branch -b swarm`; first-time bootstrap pushes the orphan branch from a temp dir, never via `checkout --orphan` in the code checkout. Linked worktree (B) stays permitted, not required. |
 | 2026-09-17 | **JSONL union merge** (R2): `_swarm/.gitattributes` ships `store/*.jsonl merge=union`. Claim/inbox files never union-merge. |
 | 2026-09-17 | **Publish loop** (R3): clean tree → fetch → check remote tip → op → commit → push; on rejection re-fetch, lost race ⇒ `reset --hard @{u}`, else rebase + retry (max 5). One generic helper serves claim, heartbeat, complete/release/reject, promote. |
 | 2026-09-17 | **Baton release + cap** (R4/R5): `release` on `orchestrator` tombstones the claim and deletes CURRENT in one commit; the baton does not count toward `max_claims_open_per_agent`. |
 | 2026-09-17 | **Promote actor** (R6): `promote` carries `by` (default = `agent`); allowed iff `by ∈ operators` or self-promote with `allow_self_promote`. |
 | 2026-09-17 | **Profile keys** (R7): add `worker_lease_ttl: 15m`; `allow_preempt`, `reviews_required_per_plan`, `slash.enabled` are advisory/reserved in v0; `lookback.write_dir` is honored. |
 | 2026-09-17 | **Audit line key** (R8): `claims.jsonl` lines carry `claim_id` (not `id`); `expired` is an audit action. |
-| 2026-09-17 | **Install paths** (R9): scripts add the skill dir to `sys.path`; SKILL.md documents `python "$SKILL_DIR/scripts/<cmd>.py"`, never `PYTHONPATH=.`. `init` creates or attaches the `swarm` worktree. |
+| 2026-09-17 | **Install paths** (R9): scripts add the skill dir to `sys.path`; SKILL.md documents `python "$SKILL_DIR/scripts/<cmd>.py"`, never `PYTHONPATH=.`. `init` bootstraps or attaches the `swarm` clone. |
 
 ---
 
@@ -423,7 +429,7 @@ Historical review narrative (strengths + full issue writeups) lived in the pre-f
 
 ## 16. Open questions (remaining)
 
-1. ~~In-repo `_swarm/` vs always-sibling `_swarm/`~~ — **locked:** in-repo as the `swarm` branch worktree; sibling repo only for multi-repo products (§3, §13 R1). Init default is `./_swarm`.
+1. ~~In-repo `_swarm/` vs always-sibling `_swarm/`~~ — **locked:** hive ref is `origin/swarm`; default directory `./_swarm` as a nested single-branch clone (option C, `docs/specs/2026-09-17-hive-checkout.md`); sibling clone for multi-repo products.
 2. ~~Claim tombstone vs delete-on-complete~~ — **locked:** rename tombstone (see §13).
 3. Exact skills marketplace pin (Researcher; not on the implementation critical path).
 4. Optional Grok Bot ↔ `agents/registry.yaml` bridge (out of v0 plan).
@@ -437,7 +443,7 @@ Historical review narrative (strengths + full issue writeups) lived in the pre-f
 
 | # | Sev | Finding | Disposition |
 |---|-----|---------|-------------|
-| R1 | critical | Plan ran `pull --rebase` / lost-race recovery inside the *project* repo (`<repo>/_swarm`); `reset --hard` there destroys uncommitted project work, and hive commits interleave with code commits. | **Accepted.** Hive is a dedicated `swarm` branch mounted as a worktree at `_swarm/`; helpers refuse anything that is not a work-tree root (§3, §8.5, §11). |
+| R1 | critical | Plan ran `pull --rebase` / lost-race recovery inside the *project* repo (`<repo>/_swarm`); `reset --hard` there destroys uncommitted project work, and hive commits interleave with code commits. | **Accepted.** Hive is a dedicated `swarm` branch cloned single-branch into `_swarm/`; helpers refuse anything that is not a work-tree root (§3, §8.5, §11). |
 | R2 | critical | Concurrent appends to `store/*.jsonl` from two clones are add/add conflicts in git, so every second push would fail to rebase. | **Accepted.** `.gitattributes` `merge=union` for `store/*.jsonl`; two-clone test added (plan Task 11). |
 | R3 | major | Plan step “pull --rebase then check file” lands in a conflicted rebase for the claim file; procedure was underspecified and hard-coded `master`. | **Accepted.** Publish loop in §8.5; branch from `@{u}`; generic `publish` helper in plan Task 11. |
 | R4 | major | No path to release the orchestrator baton; `complete` on `orchestrator` would demand a `result_ref`; CURRENT left dangling. | **Accepted.** `release_orchestrator` (§4, §5.4). Both-absent = no orchestrator, not mismatch. |
