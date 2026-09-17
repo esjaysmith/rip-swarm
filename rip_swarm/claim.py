@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from rip_swarm.audit import append_claim_audit
 from rip_swarm.ids import new_claim_id
 from rip_swarm.io import ExclExistsError, atomic_write_json, excl_create_json, read_json
 from rip_swarm.paths import HivePaths
@@ -56,6 +57,7 @@ def try_claim(
                 return doc
             raise ClaimDenied(f"held by {doc['agent']} until {doc['expires_at']}")
         tombstone_claim(path, "expired", now)
+        append_claim_audit(hive, action="expired", claim_doc=doc, now=now)
     body = {
         "task_id": task_id,
         "claim_id": new_claim_id(now),
@@ -70,6 +72,7 @@ def try_claim(
         excl_create_json(paths.claim(task_id), body)
     except ExclExistsError as e:
         raise ClaimDenied(f"lost race creating claim for {task_id}") from e
+    append_claim_audit(hive, action="claim", claim_doc=body, now=now)
     return body
 
 
@@ -90,6 +93,7 @@ def heartbeat(hive: Path, task_id: str, agent: str, now: datetime, lease_seconds
     doc = dict(doc)
     doc["expires_at"] = format_z(add_seconds(now, lease_seconds))
     atomic_write_json(path, doc)
+    append_claim_audit(hive, action="heartbeat", claim_doc=doc, now=now)
     return doc
 
 
@@ -110,6 +114,7 @@ def complete(
         doc["note"] = note
     atomic_write_json(path, doc)
     tombstone_claim(path, "complete", now)
+    append_claim_audit(hive, action="complete", claim_doc=doc, now=now, result_ref=doc["result_ref"])
     return doc
 
 
@@ -120,6 +125,7 @@ def release(hive: Path, task_id: str, agent: str, now: datetime, note: str | Non
         doc["note"] = note
         atomic_write_json(path, doc)
     tombstone_claim(path, "release", now)
+    append_claim_audit(hive, action="release", claim_doc=doc, now=now)
     return doc
 
 
@@ -130,4 +136,5 @@ def reject(hive: Path, task_id: str, agent: str, now: datetime, note: str | None
         doc["note"] = note
         atomic_write_json(path, doc)
     tombstone_claim(path, "reject", now)
+    append_claim_audit(hive, action="reject", claim_doc=doc, now=now)
     return doc
