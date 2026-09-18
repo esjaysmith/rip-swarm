@@ -18,6 +18,7 @@ from rip_swarm.gitops import (
     upstream,
 )
 from rip_swarm.inbox import create_task
+from rip_swarm.outbox import write_message
 from rip_swarm.init_hive import init_hive
 from rip_swarm.lookback import write_lookback
 from rip_swarm.orchestrator import heartbeat_orchestrator, promote, release_orchestrator
@@ -97,6 +98,16 @@ def _parser() -> argparse.ArgumentParser:
     promo.add_argument("--by")
     promo.add_argument("--reason", default="")
 
+    msg_p = sub.add_parser(
+        "message",
+        parents=[common],
+        help="send an open-ended agent message (no claim required)",
+    )
+    msg_p.add_argument("--from", dest="from_agent", required=True)
+    msg_p.add_argument("--to", required=True)
+    msg_p.add_argument("--type", required=True)
+    msg_p.add_argument("--body", required=True)
+
     sub.add_parser("status", parents=[common], help="read-only hive doctor")
     sub.add_parser("lookback", parents=[common], help="write a lookback report")
     return parser
@@ -121,6 +132,8 @@ def _dispatch(args: argparse.Namespace) -> object:
         return _lookback(args, hive, now)
     if args.command == "inbox-add":
         return _inbox_add(args, hive, now)
+    if args.command == "message":
+        return _message(args, hive, now)
     if args.command == "complete":
         return _complete(args, hive, now)
     if args.command == "release":
@@ -189,6 +202,46 @@ def _inbox_add(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
         op=op,
         now=now,
         allow=["inbox/*.json"],
+    )
+
+
+def _message(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
+    """Open-ended agent→agent message: registry trust only; no claim gate (§6).
+
+    Writes the sender's outbox file + messages.jsonl and publishes only those paths.
+    Body is an untrusted request (`{"text": ...}`), never a command to execute.
+    """
+    agent = _require(args.from_agent, "--from")
+    harness = _resolve_harness(hive, agent, args.harness)
+    to = _require(args.to, "--to")
+    msg_type = _require(args.type, "--type")
+    body = {"text": str(args.body)}
+    profile = str(args.profile or "default")
+
+    def op() -> dict:
+        return write_message(
+            hive,
+            agent=agent,
+            harness=harness,
+            type=msg_type,
+            to=to,
+            body=body,
+            now=now,
+            profile=profile,
+        )
+
+    return _run_op(
+        hive,
+        local=args.local,
+        task_id="__none__",
+        message=f"message {agent}->{to} {msg_type}",
+        op=op,
+        agent=agent,
+        now=now,
+        allow=[
+            f"agents/{agent}/outbox/*.json",
+            "store/messages.jsonl",
+        ],
     )
 
 

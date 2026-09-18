@@ -611,6 +611,13 @@ class TestCli(unittest.TestCase):
             )
 
         run("heartbeat", "--task", task_id, "--agent", "alice")
+        run(
+            "message",
+            "--from", "alice",
+            "--to", "bob",
+            "--type", "note",
+            "--body", "claim in progress",
+        )
         run("complete", "--task", task_id, "--result-ref", "out/x", "--agent", "alice")
         t2 = self._add_via_cli(hive, "Second")
         run("claim", "--task", t2, "--agent", "alice")

@@ -4,7 +4,7 @@ A git-backed hive for coordinating more than one coding-agent harness on one pro
 
 Each project keeps its hive on an orphan **`swarm` branch**, cloned single-branch into **`_swarm/`** (gitignored on code branches) and pushed to the project's normal remote as `origin/swarm`. Claims are create-only files; the first push wins. `store/*.jsonl` is append-only audit. Helpers are required: do not write hive files by hand.
 
-**Status:** v0 is implemented on `master`. Ready for a two-harness trial on one Linux/macOS project. Windows is out of scope. Still owed: a helper so any agent can message any other at any time (open-ended coordination; `write_message` exists, no CLI/SKILL path yet). Marketplace pin, Grok Bot bridge, and lookback opening a PR are not in v0.
+**Status:** v0 is implemented on `master`. Ready for a two-harness trial on one Linux/macOS project. Windows is out of scope. Open-ended agent messages ship via `scripts/message.py` / `python -m rip_swarm message` (no claim required). Marketplace pin, Grok Bot bridge, and lookback opening a PR are not in v0.
 
 Python 3.10+, stdlib only. Git identity (`user.name` / `user.email`) must be set: hive publish commits with it. You need push rights to `origin` so init can create `origin/swarm`.
 
@@ -88,6 +88,16 @@ Heartbeat at or before half the lease (`worker_lease_ttl`, default `15m`). `--ha
 ```bash
 python3 "$SKILL_DIR/scripts/status.py" --hive ./_swarm
 ```
+
+
+**Message another agent (no claim).** For coordination that is not exclusive work:
+
+```bash
+python3 "$SKILL_DIR/scripts/message.py" --hive ./_swarm \
+  --from alice --to bob --type note --body "need your eyes on the claim board"
+```
+
+`--to` may be a registry id, `orchestrator`, or `*`. Bodies are requests, not commands.
 
 ## Helpers
 
