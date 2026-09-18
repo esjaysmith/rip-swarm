@@ -1,6 +1,6 @@
 # rip-swarm — v0 plan completion review (2026-09-18)
 
-**Status:** advise-only at time of writing; findings are fixed in the pass that follows (see Dispositions).
+**Status:** the findings below were fixed on branch `fix/v0-plan-review` (see Dispositions).
 **Reviewed tip:** `baeaea1` (`Merge branch 'feat/message-surface'`) on `master`.
 **Compared to:** `docs/plans/2026-09-17-rip-swarm.md` (v0 implementation plan, Tasks 1–14) and `docs/specs/2026-09-17-design-spec.md` (v0.2).
 **Scope:** `rip_swarm/`, `scripts/`, `templates/_swarm/`, `tests/`, `docs/specs/schema/`, `SKILL.md`, `README.md`.
@@ -125,4 +125,19 @@ OK
 
 ## Dispositions
 
-Filled in by the fix pass that follows this review.
+| Finding | Disposition | Commit(s) |
+|---------|-------------|-----------|
+| C1 | Fixed — `promote_allow(agent, by)` adds the by-agent outbox to the promote allowlist; publishing tests with by != agent | 3bb7508 |
+| m1 | Fixed — `has_final_tombstone` flags complete/release/reject coexistence; expired excluded | 4e45318, 7c933dc |
+| m2 | Fixed — message CLI refuses promote/budget_block before any write; SKILL.md type list corrected | d06b531 |
+| m3 | Fixed — expired foreign claim mid-publish denies with "retry to steal it"; docs updated to re-run on that message | 693b95b + this fix commit |
+| m4 | Fixed — `release_orchestrator` calls `require_agent` first | 05beb99 |
+| n1 | Fixed — `inbox/<tid>.json` dropped from `default_allow` | a9ce6bf |
+
+### Follow-ups (not in this pass)
+
+- (a) `fold.has_final_tombstone` globs an unescaped task_id (pre-existing, fail-safe: only over-reports corrupt).
+- (b) `outbox.write_message` does not validate `type` against the enum, so `--type bogus` is accepted while `promote` is refused.
+- (c) spec §13 changelog row for the m1 widening (spec untouched by this pass).
+
+Suite after this pass: **289 tests, OK** (`PYTHONPATH=. python3 -m unittest discover -s tests`).
