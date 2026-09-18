@@ -60,9 +60,9 @@ def _from_doc(task_id: str, path: Path, doc: dict, now: datetime) -> Holder | Ex
 _FINAL_ACTIONS = ("complete", "release", "reject")
 
 
-def final_tombstone_action(claims_dir: Path, task_id: str) -> str | None:
+def has_final_tombstone(claims_dir: Path, task_id: str) -> str | None:
     """The final action (complete/release/reject) whose tombstone exists
-    beside the active claim, or None.
+    beside the active claim, or None. Truthy exactly when one does.
 
     `_finalize` writes the tombstone and then unlinks the active path; a crash
     between those two steps leaves both on disk. The task is neither held nor
@@ -76,12 +76,8 @@ def final_tombstone_action(claims_dir: Path, task_id: str) -> str | None:
     return None
 
 
-def has_final_tombstone(claims_dir: Path, task_id: str) -> bool:
-    return final_tombstone_action(claims_dir, task_id) is not None
-
-
 def _fold_path(task_id: str, path: Path, now: datetime) -> Holder | Expired | Corrupt:
-    action = final_tombstone_action(path.parent, task_id)
+    action = has_final_tombstone(path.parent, task_id)
     if action is not None:
         return Corrupt(
             task_id=task_id,
