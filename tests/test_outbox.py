@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
+from rip_swarm.claim import ClaimDenied
 from rip_swarm.outbox import write_message
 from rip_swarm.registry import UnknownAgent
 
@@ -47,9 +48,22 @@ class TestOutbox(unittest.TestCase):
                 topic="ops", to="*", body={"text": "x"}, now=T0,
             )
 
+    def test_harness_mismatch_refused_before_any_write(self):
+        # Same contract as claim._require_registered: registry harness is SoT.
+        with self.assertRaises(ClaimDenied) as ctx:
+            write_message(
+                self.hive, agent="alice", harness="WRONG", type="ops",
+                topic="ops", to="*", body={"text": "x"}, now=T0,
+            )
+        msg = str(ctx.exception)
+        self.assertIn("claude-code", msg)
+        self.assertIn("WRONG", msg)
+        self.assertFalse((self.hive / "store" / "messages.jsonl").exists())
+        self.assertFalse((self.hive / "agents" / "alice" / "outbox").exists())
+
     def test_cannot_write_other_outbox(self):
         doc = write_message(
-            self.hive, agent="bob", harness="codex", type="ops",
+            self.hive, agent="bob", harness="claude-code", type="ops",
             topic="ops", to="*", body={"text": "x"}, now=T0,
         )
         self.assertFalse((self.hive / "agents" / "alice" / "outbox" / f"{doc['id']}.json").exists())

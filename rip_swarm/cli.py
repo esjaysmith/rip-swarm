@@ -51,12 +51,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--hive")
-    common.add_argument("--profile")
+    # Shared flags without --agent (message uses --from instead).
+    base = argparse.ArgumentParser(add_help=False)
+    base.add_argument("--hive")
+    base.add_argument("--profile")
+    base.add_argument("--harness")
+    base.add_argument("--local", action="store_true")
+
+    common = argparse.ArgumentParser(add_help=False, parents=[base])
     common.add_argument("--agent")
-    common.add_argument("--harness")
-    common.add_argument("--local", action="store_true")
 
     parser = argparse.ArgumentParser(
         prog="rip-swarm",
@@ -100,7 +103,7 @@ def _parser() -> argparse.ArgumentParser:
 
     msg_p = sub.add_parser(
         "message",
-        parents=[common],
+        parents=[base],
         help="send an open-ended agent message (no claim required)",
     )
     msg_p.add_argument("--from", dest="from_agent", required=True)

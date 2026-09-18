@@ -109,6 +109,34 @@ class TestMessageSurface(unittest.TestCase):
         )
         self.assertFalse((self.hive / "agents" / "alice" / "outbox").exists())
 
+    def test_message_does_not_accept_agent_flag(self):
+        # n1: --from is the sender; --agent from the claim parent must not linger.
+        self._seed()
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            main([
+                "message", "--hive", str(self.hive),
+                "--agent", "alice",
+                "--from", "alice", "--to", "bob",
+                "--type", "note", "--body", "x", "--local",
+            ])
+        self.assertEqual(cm.exception.code, 2)
+
+    def test_harness_mismatch_via_cli_exit_2(self):
+        self._seed()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main([
+                "message", "--hive", str(self.hive),
+                "--from", "alice", "--to", "bob",
+                "--type", "note", "--body", "x",
+                "--harness", "nope", "--local",
+            ])
+        self.assertEqual(rc, 2)
+        self.assertIn("harness", err.getvalue().lower())
+        self.assertEqual(
+            (self.hive / "store" / "messages.jsonl").read_text(encoding="utf-8"), ""
+        )
+
     def test_script_shim_works_from_other_cwd(self):
         self._seed()
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}

@@ -4,6 +4,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rip_swarm.audit import append_jsonl
+from rip_swarm.claim import ClaimDenied
 from rip_swarm.ids import new_msg_id
 from rip_swarm.io import excl_create_json
 from rip_swarm.paths import HivePaths
@@ -39,7 +40,13 @@ def write_message(
     ref: dict | None = None,
     profile: str = "default",
 ) -> dict:
-    require_agent(hive, agent)
+    rec = require_agent(hive, agent)
+    # Registry is SoT for harness (§5), same gate as claim._require_registered —
+    # library callers must not bypass the CLI's _resolve_harness check.
+    if harness != rec["harness"]:
+        raise ClaimDenied(
+            f"harness mismatch for {agent}: registry says {rec['harness']!r}, got {harness!r}"
+        )
     if type not in TYPES:
         raise ValueError(f"unknown message type: {type!r}")
     if topic is None:
