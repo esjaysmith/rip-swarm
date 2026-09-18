@@ -260,7 +260,6 @@ def default_allow(task_id: str, agent: str | None) -> list[str]:
         allow += [
             f"claims/{tid}.json",
             f"claims/{tid}.*.json",
-            f"inbox/{tid}.json",
         ]
     if task_id == "orchestrator":
         allow.append("orchestrator/CURRENT.json")
