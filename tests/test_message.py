@@ -109,6 +109,53 @@ class TestMessageSurface(unittest.TestCase):
         )
         self.assertFalse((self.hive / "agents" / "alice" / "outbox").exists())
 
+    def test_type_promote_refused(self):
+        self._seed()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main([
+                "message", "--hive", str(self.hive),
+                "--from", "alice", "--to", "bob",
+                "--type", "promote", "--body", "x", "--local",
+            ])
+        self.assertEqual(rc, 1)
+        self.assertIn("promote", err.getvalue())
+        self.assertIn("claim helpers", err.getvalue())
+        self.assertEqual(
+            (self.hive / "store" / "messages.jsonl").read_text(encoding="utf-8"), ""
+        )
+        self.assertFalse((self.hive / "agents" / "alice" / "outbox").exists())
+
+    def test_type_budget_block_refused(self):
+        self._seed()
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main([
+                "message", "--hive", str(self.hive),
+                "--from", "alice", "--to", "bob",
+                "--type", "budget_block", "--body", "x", "--local",
+            ])
+        self.assertEqual(rc, 1)
+        self.assertIn("budget_block", err.getvalue())
+        self.assertIn("claim helpers", err.getvalue())
+        self.assertEqual(
+            (self.hive / "store" / "messages.jsonl").read_text(encoding="utf-8"), ""
+        )
+        self.assertFalse((self.hive / "agents" / "alice" / "outbox").exists())
+
+    def test_type_note_still_succeeds(self):
+        self._seed()
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = main([
+                "message", "--hive", str(self.hive),
+                "--from", "alice", "--to", "bob",
+                "--type", "note", "--body", "hi", "--local",
+            ])
+        self.assertEqual(rc, 0)
+        outboxes = list((self.hive / "agents" / "alice" / "outbox").glob("msg_*.json"))
+        self.assertEqual(len(outboxes), 1)
+
     def test_message_does_not_accept_agent_flag(self):
         # n1: --from is the sender; --agent from the claim parent must not linger.
         self._seed()

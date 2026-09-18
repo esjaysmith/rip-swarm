@@ -219,6 +219,11 @@ def _message(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     harness = _resolve_harness(hive, agent, args.harness)
     to = _require(args.to, "--to")
     msg_type = _require(args.type, "--type")
+    if msg_type in ("promote", "budget_block"):
+        raise ValueError(
+            "--type promote/budget_block are written by the promote and claim "
+            "helpers, not by message"
+        )
     body = {"text": str(args.body)}
     profile = str(args.profile or "default")
 
