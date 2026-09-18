@@ -201,6 +201,8 @@ Append-only. One JSON object per line. Every message is first written as `agents
 - `to`: a registry agent id, the role literal `orchestrator`, or `*` (broadcast).
 - `id`: `msg_` + ULID (Crockford), UTC `ts` with `Z` suffix only.
 
+Messaging is **not gated on a claim**. Any registered agent may write a message to any other registered agent, to `orchestrator`, or to `*` at any time. That is the open-ended coordination path; inbox and claims remain the path for exclusive work. Bodies stay untrusted requests (§5).
+
 **Reserved names:** `orchestrator` and `*` may not be registry agent ids. Agent ids match `^[a-z0-9][a-z0-9_-]{0,63}$`.
 
 `budget_block.body`: `{ "agent", "rule", "limit", "observed" }`.  
@@ -393,14 +395,16 @@ Portable skill also triggers on description keywords (`lookback`, hive, claims) 
 | 2026-09-17 | **Audit line key** (R8): `claims.jsonl` lines carry `claim_id` (not `id`); `expired` is an audit action. |
 | 2026-09-17 | **Install paths** (R9): scripts add the skill dir to `sys.path`; SKILL.md documents `python "$SKILL_DIR/scripts/<cmd>.py"`, never `PYTHONPATH=.`. `init` bootstraps or attaches the `swarm` clone. |
 | 2026-09-17 | **Implementation-review fixes** (`docs/plans/2026-09-17-implementation-review.md`): publish commits only allow-listed paths; registry + harness gate at the claim primitive; baton via `claim_baton` (promote-only); `--harness` optional (registry default); `--local` refused on hives with upstream unless `RIP_SWARM_ALLOW_LOCAL=1`; status flags active+complete coexistence as corrupt. |
+| 2026-09-17 | **Open-ended messages:** any registered agent may message any other registered agent, `orchestrator`, or `*` at any time; holding a claim is not required. Primitive is `write_message`. Helper / CLI / SKILL procedure still owed (§14). |
 
 ---
 
 ## 14. Recommended next moves (reordered)
 
 1. ~~Decision lock on claim primitive + SoT~~ — done in §4, §7, §13.
-2. Execute `docs/plans/2026-09-17-rip-swarm.md` (stdlib helpers → two-clone git spike → PROTOCOL/templates → SKILL.md).
+2. ~~Execute `docs/plans/2026-09-17-rip-swarm.md`~~ — done; v0 runtime on `master`.
 3. Parallel anytime: Researcher pins skills installer / marketplace row.
+4. **Open-ended agent messages.** Any registered agent can message any other agent (or `*` / `orchestrator`) at any time, with no claim required, for coordination that is not exclusive work. `rip_swarm.outbox.write_message` already writes the outbox file + JSONL audit and accepts those `to` values. Still owed: a helper (`scripts/message.py` / `python -m rip_swarm message`), SKILL.md procedure, and publish of that op. Do not add a shared mailbox.
 
 ---
 
