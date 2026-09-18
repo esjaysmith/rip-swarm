@@ -57,22 +57,37 @@ def _from_doc(task_id: str, path: Path, doc: dict, now: datetime) -> Holder | Ex
     )
 
 
-COMPLETE_COEXIST_ERROR = "active claim and complete tombstone coexist"
+_FINAL_ACTIONS = ("complete", "release", "reject")
 
 
-def has_complete_tombstone(claims_dir: Path, task_id: str) -> bool:
-    """True when `<task_id>.complete.*.json` exists beside the active claim.
+def final_tombstone_action(claims_dir: Path, task_id: str) -> str | None:
+    """The final action (complete/release/reject) whose tombstone exists
+    beside the active claim, or None.
 
     `_finalize` writes the tombstone and then unlinks the active path; a crash
     between those two steps leaves both on disk. The task is neither held nor
     cleanly settled, so callers report it as corrupt instead of picking one.
+    `expired` tombstones are excluded: one beside a fresh claim is the normal
+    steal path, not a crash window.
     """
-    return any(claims_dir.glob(f"{task_id}.complete.*.json"))
+    for action in _FINAL_ACTIONS:
+        if any(claims_dir.glob(f"{task_id}.{action}.*.json")):
+            return action
+    return None
+
+
+def has_final_tombstone(claims_dir: Path, task_id: str) -> bool:
+    return final_tombstone_action(claims_dir, task_id) is not None
 
 
 def _fold_path(task_id: str, path: Path, now: datetime) -> Holder | Expired | Corrupt:
-    if has_complete_tombstone(path.parent, task_id):
-        return Corrupt(task_id=task_id, path=path, error=COMPLETE_COEXIST_ERROR)
+    action = final_tombstone_action(path.parent, task_id)
+    if action is not None:
+        return Corrupt(
+            task_id=task_id,
+            path=path,
+            error=f"active claim and {action} tombstone coexist",
+        )
     try:
         doc = read_json(path)
     except (OSError, ValueError, json.JSONDecodeError) as e:

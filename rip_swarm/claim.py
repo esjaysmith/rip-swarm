@@ -78,7 +78,7 @@ def _finalize(path: Path, doc: dict, action: str, now: datetime) -> Path:
     path. The active path never carries result_ref, so it is never mistaken for
     a finished claim. A crash between the two steps leaves the active file and
     its tombstone side by side; fold/status report that pair as corrupt
-    ("active claim and complete tombstone coexist") rather than as a holder."""
+    ("active claim and <action> tombstone coexist") rather than as a holder."""
     for dest in _tombstone_candidates(path, action, now):
         if write_json_to_new_path(dest, doc):
             path.unlink(missing_ok=True)

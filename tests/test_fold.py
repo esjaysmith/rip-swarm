@@ -168,39 +168,57 @@ class TestFold(unittest.TestCase):
 
     # --- m2: crash window between tombstone write and active unlink ----------
 
-    def _plant_crash_window(self, task_id=None):
+    def _plant_crash_window(self, action, task_id=None):
         """Recreate a kill between `_finalize`'s tombstone write and unlink."""
         tid = task_id or self.task["id"]
         try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
         active = self.hive / "claims" / f"{tid}.json"
         body = active.read_text(encoding="utf-8")
-        (self.hive / "claims" / f"{tid}.complete.20260917T090100Z.json").write_text(
+        (self.hive / "claims" / f"{tid}.{action}.20260917T090100Z.json").write_text(
             body, encoding="utf-8"
         )
         return tid
 
     def test_active_plus_complete_tombstone_folds_corrupt(self):
-        tid = self._plant_crash_window()
+        tid = self._plant_crash_window("complete")
         rec = active_holder(self.hive, tid, T0)
         self.assertIsInstance(rec, Corrupt)
         self.assertEqual(rec.error, "active claim and complete tombstone coexist")
 
     def test_crash_window_excluded_from_active_set_and_budget(self):
-        tid = self._plant_crash_window()
+        tid = self._plant_crash_window("complete")
         self.assertNotIn(tid, active_set(self.hive, T0))
         self.assertEqual(open_claim_count(self.hive, "alice", T0), 0)
 
     def test_crash_window_listed_by_corrupt_claims(self):
-        tid = self._plant_crash_window()
+        tid = self._plant_crash_window("complete")
         recs = corrupt_claims(self.hive)
         self.assertEqual([r.task_id for r in recs], [tid])
         self.assertEqual(recs[0].error, "active claim and complete tombstone coexist")
 
-    def test_release_tombstone_does_not_trip_the_crash_window(self):
+    def test_active_plus_release_tombstone_folds_corrupt(self):
+        tid = self._plant_crash_window("release")
+        rec = active_holder(self.hive, tid, T0)
+        self.assertIsInstance(rec, Corrupt)
+        self.assertEqual(rec.error, "active claim and release tombstone coexist")
+        recs = corrupt_claims(self.hive)
+        self.assertEqual([r.task_id for r in recs], [tid])
+        self.assertEqual(recs[0].error, "active claim and release tombstone coexist")
+
+    def test_active_plus_reject_tombstone_folds_corrupt(self):
+        tid = self._plant_crash_window("reject")
+        rec = active_holder(self.hive, tid, T0)
+        self.assertIsInstance(rec, Corrupt)
+        self.assertEqual(rec.error, "active claim and reject tombstone coexist")
+        recs = corrupt_claims(self.hive)
+        self.assertEqual([r.task_id for r in recs], [tid])
+        self.assertEqual(recs[0].error, "active claim and reject tombstone coexist")
+
+    def test_expired_tombstone_beside_active_claim_is_still_a_holder(self):
         tid = self.task["id"]
         try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
         body = (self.hive / "claims" / f"{tid}.json").read_text(encoding="utf-8")
-        (self.hive / "claims" / f"{tid}.release.20260917T090100Z.json").write_text(
+        (self.hive / "claims" / f"{tid}.expired.20260917T090100Z.json").write_text(
             body, encoding="utf-8"
         )
         self.assertIsInstance(active_holder(self.hive, tid, T0), Holder)
