@@ -380,6 +380,14 @@ def _push_with_retries(
             _run(hive, "rebase", "--abort", check=False)
             _reset_upstream(hive)
             if lost:
+                # `remote` passed `_unexpired_held_by_other` above, so a foreign holder
+                # here is an *expired* one: stealable, not a lost race. The op closure has
+                # already run against a reset tree, so publish cannot retry it itself --
+                # it says so and the caller re-runs.
+                if _held_by_other(remote, agent):
+                    raise ClaimDenied(
+                        "expired claim reached the remote tip first; retry to steal it"
+                    )
                 raise ClaimDenied("lost race on remote tip")
             raise GitopsError("rebase onto upstream failed")
     _reset_upstream(hive)

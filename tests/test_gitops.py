@@ -6,7 +6,13 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from rip_swarm.claim import ClaimDenied
-from rip_swarm.gitops import DirtyHive, NotHiveRepo, claim_and_publish, publish
+from rip_swarm.gitops import (
+    DirtyHive,
+    NotHiveRepo,
+    claim_and_publish,
+    publish,
+    remote_claim,
+)
 from rip_swarm.inbox import create_task
 from rip_swarm.io import read_json
 from rip_swarm.outbox import write_message
@@ -335,10 +341,58 @@ class TestGitops(unittest.TestCase):
             "",
         )
 
-    # --- item 1: unpushed local commit must never be destroyed ---
-
     def _head(self, repo):
         return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+
+    def _upstream_head(self, repo):
+        return subprocess.check_output(["git", "rev-parse", "@{u}"], cwd=repo, text=True).strip()
+
+    def test_expired_foreign_claim_mid_publish_says_retry(self):
+        # B's claim reaches the remote tip while A is mid-publish, so A's push is rejected and
+        # the rebase conflicts on the claim file. B's lease is already expired from A's point of
+        # view, so this is not a lost race: A is told to retry, and the retry steals the claim.
+        from rip_swarm import gitops
+        from rip_swarm.policy import try_claim_with_policy
+        from rip_swarm.profile import load_profile
+        from rip_swarm.timeutil import add_seconds
+
+        later = add_seconds(T0, 120)
+        injected = {"done": False}
+
+        def op_a():
+            doc = try_claim_with_policy(
+                self.ha, task_id=self.task["id"], agent="alice",
+                harness="claude-code", now=later, profile=load_profile(self.ha, None),
+            )
+            if not injected["done"]:
+                injected["done"] = True
+                # bob claims with a 60s lease at T0: expired well before alice's `later`.
+                claim_and_publish(
+                    self.hb, task_id=self.task["id"], agent="bob", harness="codex",
+                    now=T0, lease_seconds=60,
+                )
+            return doc
+
+        with self.assertRaises(ClaimDenied) as ctx:
+            gitops.publish(
+                self.ha, task_id=self.task["id"], op=op_a,
+                message=f"claim {self.task['id']}", agent="alice", now=later,
+            )
+        self.assertTrue(injected["done"])
+        self.assertIn("retry", str(ctx.exception))
+        # A is left clean and at the remote tip, so the retry can proceed from a sane state.
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True), ""
+        )
+        self.assertEqual(self._head(self.ha), self._upstream_head(self.ha))
+        # The retry steals bob's expired claim.
+        claim_and_publish(
+            self.ha, task_id=self.task["id"], agent="alice", harness="claude-code",
+            now=later, lease_seconds=900,
+        )
+        self.assertEqual(remote_claim(self.ha, self.task["id"])["agent"], "alice")
+
+    # --- item 1: unpushed local commit must never be destroyed ---
 
     def _local_claim_commit(self, hive, agent, harness, now):
         from rip_swarm.claim import try_claim
@@ -479,7 +533,7 @@ class TestGitops(unittest.TestCase):
         with self.assertRaises(TypeError):
             publish(self.ha, task_id="__none__", op=lambda: {}, message="x")
 
-    def test_rebase_addadd_conflict_on_claim_is_lost_race(self):
+    def test_rebase_addadd_conflict_on_expired_claim_says_retry(self):
         from rip_swarm import gitops
 
         real_run = gitops._run
@@ -509,7 +563,9 @@ class TestGitops(unittest.TestCase):
         finally:
             gitops._run = real_run
         self.assertTrue(injected["done"])
-        self.assertIn("lost race", str(ctx.exception))
+        # alice's claim is expired from bob's `later`, so the conflict is a stealable claim
+        # reaching the tip first, not a lost race.
+        self.assertIn("retry", str(ctx.exception))
         self.assertEqual(
             subprocess.check_output(["git", "status", "--porcelain"], cwd=self.hb, text=True),
             "",
