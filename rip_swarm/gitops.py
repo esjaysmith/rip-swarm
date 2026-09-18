@@ -275,6 +275,11 @@ def promote_allow(agent: str, by: str | None) -> list[str]:
     promoted agent's, so `default_allow("orchestrator", agent)` alone is too
     narrow whenever an operator promotes someone else (`by != agent`). Add the
     `by` outbox pattern too, skipping the duplicate when they're the same id.
+
+    Callers must pass the same `by` that `orchestrator.promote` resolves
+    (`by or agent`) -- the allowlist has to match the op's write set exactly,
+    or a `None`/empty `by` here would under-allow the outbox that op actually
+    writes to.
     """
     allow = default_allow("orchestrator", agent)
     if by and by != agent:

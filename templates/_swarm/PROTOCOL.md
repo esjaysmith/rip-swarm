@@ -28,7 +28,7 @@ If mirror and SoT disagree, SoT wins. Repair CURRENT from the claim file. Both a
 3. Helper creates `claims/<task_id>.json` with `O_CREAT|O_EXCL` and `expires_at` (`worker_lease_ttl`).
 4. Helper appends an audit line to `store/claims.jsonl`.
 5. Helper commits those paths and pushes.
-6. If the push is rejected and the remote tip now holds someone else’s claim file at that path: the helper resets the hive to the remote tip and reports **lost race**. Do not mutate the project. Pick other work.
+6. If the push is rejected and the remote tip now holds someone else’s claim file at that path: the helper resets the hive to the remote tip and denies (exit 2). If the holder is unexpired, it reports **lost race** — do not mutate the project, pick other work. If the holder is expired (it reached the tip first mid-publish, but is stealable), it reports **retry to steal it** — re-run the claim once instead.
 7. Heartbeat: holder rewrites `expires_at` on the claim file + audit `heartbeat`, at or before half the lease.
 8. Complete: require `result_ref`; rename claim to `claims/<task_id>.complete.<UTC>.json`.
 9. Release/reject: same rename with `release` / `reject`.

@@ -145,5 +145,37 @@ class TestStatus(unittest.TestCase):
         out = format_status(r)
         self.assertIn("active claim and complete tombstone coexist", out)
 
+    # --- m1: active claim + release/reject tombstone is corrupt AND unattended -
+
+    def test_release_crash_window_corrupt_and_unattended(self):
+        t = create_task(self.hive, title="T", created_by="op", now=T0)
+        try_claim(self.hive, t["id"], "alice", "claude-code", T0, 900)
+        active = self.hive / "claims" / f"{t['id']}.json"
+        (self.hive / "claims" / f"{t['id']}.release.20260917T090100Z.json").write_text(
+            active.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        r = status_report(self.hive, T0)
+        self.assertEqual(r["active_claims"], [])
+        self.assertEqual(
+            [(c["task_id"], c["error"]) for c in r["corrupt_claims"]],
+            [(t["id"], "active claim and release tombstone coexist")],
+        )
+        self.assertEqual(r["inbox_without_claim"], [t["id"]])
+
+    def test_reject_crash_window_corrupt_and_unattended(self):
+        t = create_task(self.hive, title="T", created_by="op", now=T0)
+        try_claim(self.hive, t["id"], "alice", "claude-code", T0, 900)
+        active = self.hive / "claims" / f"{t['id']}.json"
+        (self.hive / "claims" / f"{t['id']}.reject.20260917T090100Z.json").write_text(
+            active.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+        r = status_report(self.hive, T0)
+        self.assertEqual(r["active_claims"], [])
+        self.assertEqual(
+            [(c["task_id"], c["error"]) for c in r["corrupt_claims"]],
+            [(t["id"], "active claim and reject tombstone coexist")],
+        )
+        self.assertEqual(r["inbox_without_claim"], [t["id"]])
+
 if __name__ == "__main__":
     unittest.main()

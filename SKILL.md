@@ -70,7 +70,7 @@ Unregistered `--from` is refused. Unknown `--to` (not in the registry and not `o
 python "$SKILL_DIR/scripts/claim.py" --hive "$RIP_SWARM_HIVE" --task TASK_ID --agent AGENT
 ```
 
-Do not edit the project until this command exits 0 (push accepted). Exit code 2 means lost race: pick other work. Heartbeat at or before half the lease with `claim.py heartbeat …`; finish with `claim.py complete --result-ref PATH`.
+Do not edit the project until this command exits 0 (push accepted). Exit code 2 means the claim is not yours: if the message says *retry* (an expired claim reached the remote first), re-run the claim once; otherwise pick other work. Heartbeat at or before half the lease with `claim.py heartbeat …`; finish with `claim.py complete --result-ref PATH`.
 
 `--harness` is optional: left off, it is read from the agent's `agents/registry.yaml` entry. Pass it only to assert the value — if it does not match the registry the command exits 2.
 

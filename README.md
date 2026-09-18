@@ -75,7 +75,7 @@ python3 "$SKILL_DIR/scripts/inbox.py" --hive ./_swarm \
 
 `--body` is a request for the claiming agent to read, never a command to run.
 
-**4. Claim, then work.** Do not edit the project until this exits 0 (push accepted). Exit 2 is a lost race: pick other work.
+**4. Claim, then work.** Do not edit the project until this exits 0 (push accepted). Exit 2 means the claim is not yours: if the message says *retry* (an expired claim reached the remote first), re-run the claim once; otherwise pick other work.
 
 ```bash
 python3 "$SKILL_DIR/scripts/claim.py" --hive ./_swarm --task TASK_ID --agent alice
