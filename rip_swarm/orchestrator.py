@@ -164,6 +164,7 @@ def release_orchestrator(
     expired holder can never clear CURRENT.json and the mismatch is permanent.
     Non-holders are still refused; they take over through promote instead.
     """
+    require_agent(hive, agent)
     claim = _read_orchestrator_claim(hive)
     if claim is None:
         raise ClaimDenied("no active claim for orchestrator")

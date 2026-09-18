@@ -279,6 +279,39 @@ class TestOrchestrator(unittest.TestCase):
         with self.assertRaises(ClaimDenied):
             release_orchestrator(self.hive, agent="alice", now=T0)
 
+    def test_release_expired_baton_by_unregistered_agent_denied(self):
+        claim_path = self.hive / "claims" / "orchestrator.json"
+        claim_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(
+            claim_path,
+            {
+                "task_id": "orchestrator",
+                "claim_id": "clm_mallory",
+                "agent": "mallory",
+                "harness": "claude-code",
+                "exclusive": True,
+                "created_at": "2026-09-17T09:01:00Z",
+                "expires_at": "2026-09-17T09:31:00Z",
+                "note": None,
+            },
+        )
+        atomic_write_json(
+            self.hive / "orchestrator" / "CURRENT.json",
+            {
+                "agent": "mallory",
+                "harness": "claude-code",
+                "lease_expires_at": "2026-09-17T09:31:00Z",
+                "reason": None,
+                "claim_id": "clm_mallory",
+            },
+        )
+        later = add_seconds(T0, 1801)
+        with self.assertRaises(UnknownAgent):
+            release_orchestrator(self.hive, agent="mallory", now=later)
+        self.assertTrue(claim_path.exists())
+        self.assertEqual(read_json(claim_path)["agent"], "mallory")
+        self.assertTrue((self.hive / "orchestrator" / "CURRENT.json").exists())
+
     # --- orchestrator_state half-states (item 10) ---
 
     def test_state_current_present_claim_absent(self):
