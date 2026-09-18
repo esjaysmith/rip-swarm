@@ -496,6 +496,37 @@ class TestCli(unittest.TestCase):
             0,
         )
 
+    def test_promote_by_operator_publishes(self):
+        # C1: promote --by OPERATOR must publish, not fail with an allowlist error,
+        # because the promote message is written to the *by* agent's outbox.
+        self._hive_with_upstream()
+        path = self.hive / "profiles" / "default.yaml"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace("operators: []", "operators: [op]"),
+            encoding="utf-8",
+        )
+        subprocess.check_call(["git", "-C", str(self.hive), "add", "-A"], stdout=subprocess.DEVNULL)
+        subprocess.check_call(["git", "-C", str(self.hive), "commit", "-qm", "operators"])
+        subprocess.check_call(
+            ["git", "-C", str(self.hive), "push", "-q", "origin", "swarm"],
+            stdout=subprocess.DEVNULL,
+        )
+        self.assertEqual(
+            main([
+                "promote", "--hive", str(self.hive), "--agent", "alice",
+                "--by", "op", "--reason", "designated",
+            ]),
+            0,
+        )
+        self.assertTrue((self.hive / "claims" / "orchestrator.json").is_file())
+        self.assertTrue((self.hive / "orchestrator" / "CURRENT.json").is_file())
+        self.assertEqual(
+            subprocess.check_output(
+                ["git", "-C", str(self.hive), "status", "--porcelain"], text=True
+            ),
+            "",
+        )
+
     def test_dirty_hive_error_names_recovery(self):
         self._hive_with_upstream()
         (self.hive / "stray.txt").write_text("dirt\n", encoding="utf-8")

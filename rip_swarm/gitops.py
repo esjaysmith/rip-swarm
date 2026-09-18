@@ -269,6 +269,20 @@ def default_allow(task_id: str, agent: str | None) -> list[str]:
     return allow
 
 
+def promote_allow(agent: str, by: str | None) -> list[str]:
+    """Paths an `orchestrator.promote` op is allowed to write (§8.5, C1).
+
+    `promote` writes the audit message to the *`by`* agent's outbox, not the
+    promoted agent's, so `default_allow("orchestrator", agent)` alone is too
+    narrow whenever an operator promotes someone else (`by != agent`). Add the
+    `by` outbox pattern too, skipping the duplicate when they're the same id.
+    """
+    allow = default_allow("orchestrator", agent)
+    if by and by != agent:
+        allow.append(f"agents/{_glob_quote(by)}/outbox/*.json")
+    return allow
+
+
 def _glob_quote(literal: str) -> str:
     """Escape glob metacharacters so an id is matched literally, never as a pattern."""
     return "".join("[" + ch + "]" if ch in "*?[]" else ch for ch in literal)
@@ -541,4 +555,5 @@ def promote_and_publish(
         message=f"promote {agent}",
         agent=agent,
         now=now,
+        allow=promote_allow(agent, by),
     )

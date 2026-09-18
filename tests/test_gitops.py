@@ -838,6 +838,43 @@ class TestGitops(unittest.TestCase):
         _git(self.ha, "fetch")
         self.assertNotIn("orchestrator/CURRENT.json", self._remote_tree(self.ha))
 
+    def test_promote_by_operator_publishes_the_by_agent_outbox(self):
+        # C1: promote --by OPERATOR writes the promote message to the *by* agent's
+        # outbox, not the promoted agent's -- the allowlist must cover both.
+        from rip_swarm.gitops import promote_and_publish
+
+        (self.ha / "agents" / "registry.yaml").write_text(
+            REGISTRY + "- id: op\n  harness: human\n  role: operator\n",
+            encoding="utf-8",
+        )
+        (self.ha / "profiles").mkdir(exist_ok=True)
+        (self.ha / "profiles" / "default.yaml").write_text(
+            "operators: [op]\n", encoding="utf-8"
+        )
+        _git(self.ha, "add", "-A")
+        _git(self.ha, "commit", "-m", "register operator")
+        _git(self.ha, "push")
+
+        promote_and_publish(
+            self.ha, agent="alice", harness="claude-code", now=T0,
+            lease_seconds=1800, reason="designated", allow_self_promote=False,
+            operators=["op"], by="op",
+        )
+        _git(self.ha, "fetch")
+        listed = self._remote_tree(self.ha)
+        self.assertIn("claims/orchestrator.json", listed)
+        self.assertIn("orchestrator/CURRENT.json", listed)
+        self.assertIn("agents/op/outbox/", listed)
+        remote_msgs = subprocess.check_output(
+            ["git", "-C", str(self.ha), "show", "origin/swarm:store/messages.jsonl"],
+            text=True,
+        )
+        self.assertIn('"type": "promote"', remote_msgs)
+        self.assertEqual(
+            subprocess.check_output(["git", "status", "--porcelain"], cwd=self.ha, text=True),
+            "",
+        )
+
     # --- M2: claim_and_publish honours registry + budget (section 5) ---
 
     def test_claim_and_publish_refuses_unregistered_agent(self):

@@ -14,6 +14,7 @@ from rip_swarm.gitops import (
     GitopsError,
     NotHiveRepo,
     assert_hive_repo,
+    promote_allow,
     publish,
     upstream,
 )
@@ -430,6 +431,7 @@ def _promote(args: argparse.Namespace, hive: Path, now: datetime, profile: dict)
         op=op,
         agent=agent,
         now=now,
+        allow=promote_allow(agent, args.by or agent),
     )
 
 
