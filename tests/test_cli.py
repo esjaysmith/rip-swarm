@@ -31,6 +31,10 @@ class TestCli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.hive = Path(self.tmp.name) / "_swarm"
+        # Publishing helpers print a one-line summary; keep it out of the runner.
+        quiet = redirect_stdout(io.StringIO())
+        quiet.__enter__()
+        self.addCleanup(quiet.__exit__, None, None, None)
 
     def tearDown(self):
         self.tmp.cleanup()

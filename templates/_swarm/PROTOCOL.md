@@ -78,5 +78,6 @@ Work (project mutation, inbox completion) only after step 5 succeeded for you.
 
 ## Lookback / status
 
+- Helpers read the local `_swarm/` tree. Run `sync` (fetch + fast-forward) before `status` or `messages`, or you see a stale board.
 - `/status` is read-only doctor.
 - `/lookback` writes markdown under `lookback/`, commits and pushes it to the hive, and never edits `PROTOCOL.md` or profiles.

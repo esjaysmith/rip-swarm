@@ -396,6 +396,8 @@ Portable skill also triggers on description keywords (`lookback`, hive, claims) 
 | 2026-09-17 | **Install paths** (R9): scripts add the skill dir to `sys.path`; SKILL.md documents `python "$SKILL_DIR/scripts/<cmd>.py"`, never `PYTHONPATH=.`. `init` bootstraps or attaches the `swarm` clone. |
 | 2026-09-17 | **Implementation-review fixes** (`docs/plans/2026-09-17-implementation-review.md`): publish commits only allow-listed paths; registry + harness gate at the claim primitive; baton via `claim_baton` (promote-only); `--harness` optional (registry default); `--local` refused on hives with upstream unless `RIP_SWARM_ALLOW_LOCAL=1`; status flags active+complete coexistence as corrupt. |
 | 2026-09-17 | **Open-ended messages:** any registered agent may message any other registered agent, `orchestrator`, or `*` at any time; holding a claim is not required. Primitive is `write_message`. Helper / CLI / SKILL procedure shipped (`scripts/message.py`). |
+| 2026-09-18 | **Final-tombstone coexistence** (v0 plan review m1): `status` flags an active claim beside a `complete`, `release` or `reject` tombstone as corrupt; an `expired` tombstone beside a fresh claim stays the normal steal path. |
+| 2026-09-25 | **Read surface (trial prep):** read helpers see only the local tree, so `sync` (fetch + fast-forward; refuses dirty/diverged) runs before `status` / `messages`. `messages --to A` reads outbox files (the message SoT) addressed to A: direct, `*`, and `orchestrator` while A holds the baton; own messages excluded; `--since` exclusive. Publishing helpers print a one-line summary; `status` shows inbox titles. |
 
 ---
 
