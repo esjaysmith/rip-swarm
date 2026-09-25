@@ -45,6 +45,7 @@ def status_report(hive: Path, now: datetime) -> dict:
         "jsonl_parse_errors": _jsonl_parse_errors(hive),
         "unknown_agents": sorted(agent for agent in claim_agents if agent not in known),
         "current_mismatch": not state["matches_claim"],
+        "titles": _task_titles(hive),
     }
 
 
@@ -58,14 +59,22 @@ def format_status(report: dict) -> str:
         f"current_mismatch: {report['current_mismatch']}",
         "active_claims:",
     ]
+    titles = report.get("titles") or {}
     if report["active_claims"]:
         for rec in report["active_claims"]:
             lines.append(
-                f"  {rec['task_id']} agent={rec['agent']} expires_at={rec['expires_at']}"
+                _titled(
+                    f"  {rec['task_id']} agent={rec['agent']} expires_at={rec['expires_at']}",
+                    titles.get(rec["task_id"]),
+                )
             )
     else:
         lines.append("  (none)")
-    _section(lines, "inbox_without_claim", report["inbox_without_claim"])
+    _section(
+        lines,
+        "inbox_without_claim",
+        [_titled(tid, titles.get(tid)) for tid in report["inbox_without_claim"]],
+    )
     _section(lines, "expired_claim_files", report["expired_claim_files"])
     lines.append("jsonl_parse_errors:")
     if report["jsonl_parse_errors"]:
@@ -81,6 +90,26 @@ def format_status(report: dict) -> str:
     else:
         lines.append("  (none)")
     return "\n".join(lines) + "\n"
+
+
+def _titled(line: str, title: str | None) -> str:
+    return f"{line} {title}" if title else line
+
+
+def _task_titles(hive: Path) -> dict[str, str]:
+    """Inbox titles for display only; an unreadable task file just shows no title."""
+    inbox = HivePaths(hive).inbox
+    titles: dict[str, str] = {}
+    if not inbox.is_dir():
+        return titles
+    for path in inbox.glob("*.json"):
+        try:
+            title = json.loads(path.read_text(encoding="utf-8")).get("title")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if isinstance(title, str) and title.strip():
+            titles[path.stem] = " ".join(title.split())
+    return titles
 
 
 def _section(lines: list[str], title: str, items: list[str]) -> None:

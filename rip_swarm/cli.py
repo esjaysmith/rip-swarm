@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from collections.abc import Callable, Sequence
@@ -16,12 +17,14 @@ from rip_swarm.gitops import (
     assert_hive_repo,
     promote_allow,
     publish,
+    sync,
     upstream,
 )
 from rip_swarm.inbox import create_task
 from rip_swarm.outbox import write_message
 from rip_swarm.init_hive import init_hive
 from rip_swarm.lookback import write_lookback
+from rip_swarm.messages import format_messages, list_messages
 from rip_swarm.orchestrator import heartbeat_orchestrator, promote, release_orchestrator
 from rip_swarm.paths import resolve_hive
 from rip_swarm.policy import try_claim_with_policy
@@ -44,6 +47,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as e:
         print(e, file=sys.stderr)
         return 1
+    if isinstance(result, dict):
+        result = _summary(args, result)
     if isinstance(result, str):
         if not result.endswith("\n"):
             result += "\n"
@@ -113,6 +118,16 @@ def _parser() -> argparse.ArgumentParser:
     msg_p.add_argument("--body", required=True)
 
     sub.add_parser("status", parents=[common], help="read-only hive doctor")
+    sub.add_parser(
+        "sync", parents=[base], help="fetch and fast-forward the hive to origin/swarm"
+    )
+    msgs_p = sub.add_parser(
+        "messages", parents=[base], help="read-only: list messages, oldest first"
+    )
+    msgs_p.add_argument("--to", help="addressed to this agent (direct, *, baton)")
+    msgs_p.add_argument("--from", dest="from_agent")
+    msgs_p.add_argument("--since", help="only messages after this UTC Z timestamp")
+    msgs_p.add_argument("--type")
     sub.add_parser("lookback", parents=[common], help="write a lookback report")
     return parser
 
@@ -132,6 +147,18 @@ def _dispatch(args: argparse.Namespace) -> object:
         # unknown --profile behaves consistently (profile.py falls back).
         load_profile(hive, args.profile)
         return format_status(status_report(hive, now))
+    if args.command == "sync":
+        return _sync(hive)
+    if args.command == "messages":
+        found, unreadable = list_messages(
+            hive,
+            now=now,
+            to=args.to,
+            since=args.since,
+            frm=args.from_agent,
+            type=args.type,
+        )
+        return format_messages(found, unreadable)
     if args.command == "lookback":
         return _lookback(args, hive, now)
     if args.command == "inbox-add":
@@ -152,6 +179,34 @@ def _dispatch(args: argparse.Namespace) -> object:
     if args.command == "promote":
         return _promote(args, hive, now, profile)
     raise ValueError(f"unknown command: {args.command}")
+
+
+def _sync(hive: Path) -> str:
+    doc = sync(hive)
+    if doc["pulled"] == 0:
+        return f"hive up to date at {doc['head']}"
+    plural = "" if doc["pulled"] == 1 else "s"
+    return f"pulled {doc['pulled']} commit{plural}; hive at {doc['head']}"
+
+
+def _summary(args: argparse.Namespace, doc: dict) -> str:
+    """One line naming what a publishing helper did, so agents can quote the id."""
+    cmd = args.command
+    if cmd == "inbox-add":
+        return f"task {doc['id']}: {doc['title']}"
+    if cmd == "message":
+        return f"sent {doc['id']} {doc['from']['agent']} -> {doc['to']}"
+    if cmd == "promote":
+        return f"promoted {doc['agent']} until {doc['lease_expires_at']}"
+    if cmd in ("claim", "heartbeat"):
+        verb = "claimed" if cmd == "claim" else "heartbeat"
+        until = doc.get("expires_at") or doc.get("lease_expires_at")
+        return f"{verb} {args.task} as {args.agent} until {until}"
+    if cmd == "complete":
+        return f"complete {args.task} as {args.agent} (result_ref {doc['result_ref']})"
+    if cmd in ("release", "reject"):
+        return f"{cmd} {args.task} as {args.agent}"
+    return json.dumps(doc, sort_keys=True)
 
 
 def _init_dest(explicit: str | None) -> Path:

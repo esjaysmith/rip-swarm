@@ -248,6 +248,29 @@ def _ff_only(hive: Path) -> None:
     _run(hive, "merge", "--ff-only", "--no-edit", "@{u}")
 
 
+def sync(hive: Path) -> dict:
+    """Fetch and fast-forward the hive to its upstream; never merges or resets.
+
+    Read helpers (`status`, `messages`) look only at the local tree, so an agent that
+    is waiting on other harnesses runs this first. A dirty tree or local commits the
+    remote lacks are refused untouched: the operator decides (PROTOCOL: if history
+    diverges, stop and ask).
+    """
+    hive = hive.resolve()
+    assert_hive_repo(hive)
+    assert_clean(hive)
+    upstream(hive)
+    _fetch(hive)
+    if _out(hive, "rev-list", "@{u}..HEAD"):
+        raise GitopsError(
+            "unpushed hive commits; push or discard them before sync "
+            "(if history diverged, stop and ask the operator)"
+        )
+    behind = int(_out(hive, "rev-list", "--count", "HEAD..@{u}"))
+    _ff_only(hive)
+    return {"pulled": behind, "head": _out(hive, "rev-parse", "--short", "HEAD")}
+
+
 def default_allow(task_id: str, agent: str | None) -> list[str]:
     """Paths an ordinary claim-lifecycle op is allowed to write (§8.5).
 
