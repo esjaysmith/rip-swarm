@@ -5,7 +5,9 @@ import re
 from datetime import datetime
 from pathlib import Path
 
+from rip_swarm.board import read_board
 from rip_swarm.fold import Corrupt, Expired, Holder, active_holder
+from rip_swarm.members import list_members
 from rip_swarm.orchestrator import orchestrator_state
 from rip_swarm.paths import HivePaths
 from rip_swarm.registry import known_agents
@@ -20,6 +22,9 @@ def status_report(hive: Path, now: datetime) -> dict:
     known = known_agents(hive)
     # The baton is reported under "orchestrator"; don't double-list it as work.
     task_holders = [rec for rec in holders if rec.task_id != "orchestrator"]
+    board = read_board(hive, now)
+    activity = _last_activity(hive)
+    members = list_members(hive)
     return {
         "orchestrator": {
             "agent": state["agent"],
@@ -34,9 +39,11 @@ def status_report(hive: Path, now: datetime) -> dict:
             }
             for rec in task_holders
         ],
-        "inbox_without_claim": _inbox_without_claim(
-            hive, {rec.task_id for rec in holders}
-        ),
+        "inbox_without_claim": [
+            tid
+            for tid in _inbox_without_claim(hive, {rec.task_id for rec in holders})
+            if tid not in board or not (board[tid].rejected or board[tid].blocked_by)
+        ],
         "expired_claim_files": expired_ids,
         "corrupt_claims": [
             {"task_id": rec.task_id, "path": _rel(hive, rec.path), "error": rec.error}
@@ -46,6 +53,19 @@ def status_report(hive: Path, now: datetime) -> dict:
         "unknown_agents": sorted(agent for agent in claim_agents if agent not in known),
         "current_mismatch": not state["matches_claim"],
         "titles": _task_titles(hive),
+        "members": [
+            {"id": m["id"], "harness": m["harness"], "joined_at": m.get("joined_at"),
+             "last_activity": activity.get(m["id"])}
+            for m in members if not m["left"]
+        ],
+        "left_members": [m["id"] for m in members if m["left"]],
+        "blocked": [
+            {"task_id": tid, "waiting_on": list(view.blocked_by)}
+            for tid, view in sorted(board.items())
+            if view.blocked_by and not view.rejected and not view.completed
+        ],
+        "awaiting_acceptance": sorted(t for t, v in board.items() if v.awaiting_acceptance),
+        "fixes": {tid: view.fixes for tid, view in sorted(board.items()) if view.fixes},
     }
 
 
@@ -60,20 +80,26 @@ def format_status(report: dict) -> str:
         "active_claims:",
     ]
     titles = report.get("titles") or {}
+    fixes = report.get("fixes") or {}
     if report["active_claims"]:
         for rec in report["active_claims"]:
-            lines.append(
-                _titled(
-                    f"  {rec['task_id']} agent={rec['agent']} expires_at={rec['expires_at']}",
-                    titles.get(rec["task_id"]),
-                )
+            tid = rec["task_id"]
+            line = _titled(
+                f"  {tid} agent={rec['agent']} expires_at={rec['expires_at']}",
+                titles.get(tid),
             )
+            if tid in fixes:
+                line += f" (fixes {fixes[tid]})"
+            lines.append(line)
     else:
         lines.append("  (none)")
     _section(
         lines,
         "inbox_without_claim",
-        [_titled(tid, titles.get(tid)) for tid in report["inbox_without_claim"]],
+        [
+            _titled(tid, titles.get(tid)) + (f" (fixes {fixes[tid]})" if tid in fixes else "")
+            for tid in report["inbox_without_claim"]
+        ],
     )
     _section(lines, "expired_claim_files", report["expired_claim_files"])
     lines.append("jsonl_parse_errors:")
@@ -89,6 +115,33 @@ def format_status(report: dict) -> str:
             lines.append(f"  {rec['task_id']} ({rec['path']}): {rec['error']}")
     else:
         lines.append("  (none)")
+    _section(
+        lines,
+        "blocked",
+        [
+            f"{b['task_id']} waiting on {', '.join(b['waiting_on'])}"
+            + (f" (fixes {fixes[b['task_id']]})" if b["task_id"] in fixes else "")
+            for b in report.get("blocked", [])
+        ],
+    )
+    _section(
+        lines,
+        "awaiting_acceptance",
+        [
+            _titled(tid, titles.get(tid)) + (f" (fixes {fixes[tid]})" if tid in fixes else "")
+            for tid in report.get("awaiting_acceptance", [])
+        ],
+    )
+    _section(
+        lines,
+        "members",
+        [
+            f"{m['id']} harness={m['harness']} joined_at={m['joined_at']} "
+            f"last_activity={m['last_activity']}"
+            for m in report.get("members", [])
+        ],
+    )
+    _section(lines, "left_members", report.get("left_members", []))
     return "\n".join(lines) + "\n"
 
 
@@ -199,6 +252,28 @@ def _scan_jsonl(hive: Path, path: Path) -> list[dict]:
                     {"path": rel, "line": line_no, "error": "not a JSON object"}
                 )
     return errors
+
+
+def _last_activity(hive: Path) -> dict[str, str]:
+    """Newest `ts` per agent across messages.jsonl (`from.agent`) and claims.jsonl (`agent`)."""
+    paths = HivePaths(hive)
+    newest: dict[str, str] = {}
+    for path, key in ((paths.messages_jsonl, "from"), (paths.claims_jsonl, "agent")):
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            who = row.get(key)
+            agent = who.get("agent") if isinstance(who, dict) else who
+            ts = row.get("ts")
+            if isinstance(agent, str) and isinstance(ts, str) and ts > newest.get(agent, ""):
+                newest[agent] = ts
+    return newest
 
 
 def _rel(hive: Path, path: Path) -> str:

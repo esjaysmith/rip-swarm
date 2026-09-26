@@ -101,7 +101,7 @@ class TestStatus(unittest.TestCase):
         try_claim(self.hive, rejected["id"], "alice", "claude-code", T0, 900)
         reject(self.hive, rejected["id"], "alice", T0, note="no")
         r = status_report(self.hive, T0)
-        self.assertEqual(r["inbox_without_claim"], sorted([rejected["id"], open_t["id"]]))
+        self.assertEqual(r["inbox_without_claim"], [open_t["id"]])
 
     def test_corrupt_claims_reported_and_no_crash(self):
         claims = self.hive / "claims"
@@ -175,7 +175,7 @@ class TestStatus(unittest.TestCase):
             [(c["task_id"], c["error"]) for c in r["corrupt_claims"]],
             [(t["id"], "active claim and reject tombstone coexist")],
         )
-        self.assertEqual(r["inbox_without_claim"], [t["id"]])
+        self.assertEqual(r["inbox_without_claim"], [])
 
     def test_member_that_left_is_not_an_unknown_agent(self):
         from rip_swarm.members import create_member, write_left
@@ -185,6 +185,81 @@ class TestStatus(unittest.TestCase):
         write_left(self.hive, "grok-1", T0)
         r = status_report(self.hive, T0)
         self.assertEqual(r["unknown_agents"], [])
+
+    def test_members_blocked_awaiting_and_fixes(self):
+        from rip_swarm.members import create_member, write_left
+        from rip_swarm.outbox import write_message
+        create_member(self.hive, agent_id="grok-1", harness="grok", now=T0)
+        create_member(self.hive, agent_id="grok-2", harness="grok", now=T0)
+        write_left(self.hive, "grok-2", T0)
+        later = add_seconds(T0, 60)
+        write_message(self.hive, agent="grok-1", harness="grok", type="note", to="*",
+                      body={"text": "joined"}, now=later)
+        a = create_task(self.hive, title="a", created_by="op", now=T0)
+        b = create_task(self.hive, title="b", created_by="op", now=T0, after=[a["id"]])
+        f = create_task(self.hive, title="f", created_by="op", now=T0, fixes=a["id"])
+        try_claim(self.hive, a["id"], "alice", "claude-code", T0, 900)
+        complete(self.hive, a["id"], "alice", T0, result_ref="rip-swarm/alice@abc1234")
+        r = status_report(self.hive, T0)
+        self.assertEqual(
+            r["members"],
+            [{"id": "grok-1", "harness": "grok", "joined_at": "2026-09-17T09:01:00Z",
+              "last_activity": "2026-09-17T09:02:00Z"}],
+        )
+        self.assertEqual(r["left_members"], ["grok-2"])
+        self.assertEqual(r["blocked"], [{"task_id": b["id"], "waiting_on": [a["id"]]}])
+        self.assertEqual(r["awaiting_acceptance"], [a["id"]])
+        self.assertEqual(r["fixes"], {f["id"]: a["id"]})
+        self.assertEqual(r["inbox_without_claim"], [f["id"]])
+        text = format_status(r)
+        self.assertIn(f"  {b['id']} waiting on {a['id']}", text)
+        self.assertIn(f"  {f['id']} f (fixes {a['id']})", text)
+        self.assertIn("  grok-1 harness=grok joined_at=2026-09-17T09:01:00Z last_activity=2026-09-17T09:02:00Z", text)
+        self.assertIn("left_members:\n  grok-2", text)
+        self.assertIn(f"awaiting_acceptance:\n  {a['id']} a", text)
+
+    def test_fixes_marker_on_claimed_blocked_and_awaiting(self):
+        # Controller ruling on spec §7.4: `(fixes <T>)` is not only for
+        # inbox_without_claim — it belongs next to a fixer wherever it shows
+        # up (claimed, blocked, or awaiting acceptance).
+        a = create_task(self.hive, title="a", created_by="op", now=T0)
+        dep = create_task(self.hive, title="dep", created_by="op", now=T0)
+        claimed_fix = create_task(
+            self.hive, title="claimed fix", created_by="op", now=T0, fixes=a["id"]
+        )
+        blocked_fix = create_task(
+            self.hive, title="blocked fix", created_by="op", now=T0,
+            after=[dep["id"]], fixes=a["id"],
+        )
+        awaiting_fix = create_task(
+            self.hive, title="awaiting fix", created_by="op", now=T0, fixes=a["id"]
+        )
+        try_claim(self.hive, claimed_fix["id"], "alice", "claude-code", T0, 900)
+        try_claim(self.hive, awaiting_fix["id"], "bob", "codex", T0, 900)
+        complete(self.hive, awaiting_fix["id"], "bob", T0, result_ref="r")
+        r = status_report(self.hive, T0)
+        self.assertEqual(r["fixes"][claimed_fix["id"]], a["id"])
+        self.assertEqual(r["fixes"][blocked_fix["id"]], a["id"])
+        self.assertEqual(r["fixes"][awaiting_fix["id"]], a["id"])
+        self.assertEqual(
+            r["blocked"], [{"task_id": blocked_fix["id"], "waiting_on": [dep["id"]]}]
+        )
+        self.assertEqual(r["awaiting_acceptance"], [awaiting_fix["id"]])
+        text = format_status(r)
+        marker = f"(fixes {a['id']})"
+        active_line = next(
+            line for line in text.splitlines() if claimed_fix["id"] in line and "agent=alice" in line
+        )
+        self.assertIn(marker, active_line)
+        blocked_line = next(
+            line for line in text.splitlines() if blocked_fix["id"] in line and "waiting on" in line
+        )
+        self.assertIn(marker, blocked_line)
+        awaiting_line = next(
+            line for line in text.splitlines()
+            if line.strip().startswith(awaiting_fix["id"])
+        )
+        self.assertIn(marker, awaiting_line)
 
 if __name__ == "__main__":
     unittest.main()
