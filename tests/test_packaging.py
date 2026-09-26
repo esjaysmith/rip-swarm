@@ -59,5 +59,70 @@ class TestPackaging(unittest.TestCase):
             self.assertEqual(run.stdout.strip(), f"rip-swarm {__version__}")
 
 
+    ROLES = {"swarm-master": "<goal>", "swarm-worker": "leave"}
+
+    def _text(self, name):
+        return (SKILLS / name / "SKILL.md").read_text(encoding="utf-8")
+
+    def test_role_skills_are_operator_invoked_only(self):
+        for name, hint in self.ROLES.items():
+            fm = frontmatter(SKILLS / name / "SKILL.md")
+            self.assertEqual(fm["disable-model-invocation"], "true", name)
+            self.assertIn(hint, fm["argument-hint"], name)
+
+    def test_role_skills_run_wait_in_the_background_on_both_harnesses(self):
+        for name in self.ROLES:
+            text = self._text(name)
+            for needle in ("run_in_background: true", "background: true",
+                           "get_command_or_subagent_output", "wake ", "Exit 3"):
+                self.assertIn(needle, text, f"{name} lacks {needle!r}")
+
+    def test_role_skills_find_the_runtime(self):
+        for name in self.ROLES:
+            text = self._text(name)
+            for needle in ("../rip-swarm", "~/.agents/skills/rip-swarm",
+                           "npx skills add esjaysmith/rip-swarm"):
+                self.assertIn(needle, text, f"{name} lacks {needle!r}")
+
+    def test_every_messages_new_names_its_reader(self):
+        for path in SKILLS.glob("*/SKILL.md"):
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if "--new" in line:
+                    self.assertIn("--to", line, f"{path}: {line}")
+
+    def test_role_skill_git_commands_are_pinned_to_the_worktree(self):
+        import re
+        verbs = re.compile(r"\bgit (switch|merge|branch|rev-parse|show-ref|status|commit)\b")
+        for name in self.ROLES:
+            for line in self._text(name).splitlines():
+                if verbs.search(line):
+                    self.assertIn('git -C "$WORKTREE"', line, f"{name}: {line}")
+
+    def test_master_review_verifies_parents_quietly(self):
+        text = self._text("swarm-master")
+        self.assertIn('rev-parse -q --verify "$REVIEW^2" || true', text)
+        self.assertIn('SHA=$(git -C "$WORKTREE" rev-parse "$SHORT")', text)
+
+    def test_review_state_never_crosses_a_command(self):
+        # Each harness command is a fresh shell: a fence may only read what it assigns.
+        import re
+        for name in self.ROLES:
+            text = self._text(name)
+            self.assertIn("fresh shell", text, name)
+            for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+                for var in ("REVIEW", "TIP", "SHA", "SHORT", "T", "WORKTREE"):
+                    if re.search(rf"\${var}\b", block):
+                        self.assertRegex(block, rf"(^|[\s;]){var}=", f"{name}: ${var} unassigned in\n{block}")
+        master = self._text("swarm-master")
+        review = next(b for b in re.findall(r"```bash\n(.*?)```", master, re.S)
+                      if 'switch -c "$REVIEW"' in b)
+        for needle in ('SHA=$(git -C "$WORKTREE" rev-parse "$SHORT")', "TIP=$(",
+                       'REVIEW="rip-swarm/review-$T"', 'echo "OUTCOME='):
+            self.assertIn(needle, review)
+
+    def test_worker_never_sends_its_brief(self):
+        self.assertIn('--body "joined"', self._text("swarm-worker"))
+
+
 if __name__ == "__main__":
     unittest.main()
