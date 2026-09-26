@@ -1,6 +1,6 @@
 # Execution proposals: cascade, heartbeat, result messages, minimum review rounds
 
-**Status:** proposal. §5 reviewed at `dc611ab` (§7): needs revision (2 critical, 5 major, 3 minor, 1 nit). Revision 2 folds §7 into §5 (dispositions in §8). Not folded into the roles-and-install spec or the skills.
+**Status:** proposal. §5 reviewed at `dc611ab` (§7): needs revision (2 critical, 5 major, 3 minor, 1 nit). Revision 2 folds §7 into §5 (dispositions in §8). §5 re-reviewed at `b74679a` (§9): needs revision (1 critical, 2 minor, 1 nit). Revision 3 folds §9 (dispositions in §10). Not folded into the roles-and-install spec or the skills.
 **Date:** 2026-09-26
 **Audience:** operator + implementer
 **Related:** `docs/specs/2026-09-26-roles-and-install.md` §7.2, §7.4, §8 step 6, §9; `docs/specs/2026-09-17-design-spec.md` §9 (`reviews_required_per_plan` stays advisory); `skills/swarm-master/SKILL.md`; `skills/swarm-worker/SKILL.md`; `rip_swarm/waiter.py` (`tick`), `rip_swarm/acceptance.py` (`accept_task`), `rip_swarm/inbox.py`.
@@ -85,9 +85,9 @@ Keep messages for questions, for a release or a conflict the master would not ot
 
 ## 5. Minimum independent review rounds per artifact kind
 
-**Status:** design agreed with the operator (2026-09-26). Revision 2 folds the review in §7 (dispositions in §8). It replaces the earlier sketch of consecutive clean reviews.
+**Status:** design agreed with the operator (2026-09-26). Revision 2 folds the review in §7 (dispositions in §8); revision 3 folds the second review in §9 (dispositions in §10). It replaces the earlier sketch of consecutive clean reviews.
 
-Today the master accepts a completed task after one judgment of its own. Nothing lets the operator say "a spec needs two independent reviews" in a way that a takeover master still sees and that no model slip can skip. This section adds three things:
+Today the master accepts a completed task after one judgment of its own. Nothing lets the operator say "a spec needs two independent reviews" in a way that a takeover master still sees and that the helpers enforce. With this section, every task the master marks as an artifact carries its number on the board, and no helper lets that number be lowered or its rounds skipped. Marking is the master's plan step: a task posted without `--kind` is not an artifact, and nothing forces one (§5.5). This section adds three things:
 - a number per artifact kind, stated once;
 - review tasks that workers do;
 - a rule that `accept` enforces.
@@ -160,11 +160,15 @@ The worker builds on the named sha, as it already does for a `fixes` task. It co
 - **Round.** A review task in the chain that is completed and not rejected.
 - **Ready.** `A` is ready when rounds ≥ `min_reviews` **and** the head is a review task whose verdict is `clean`.
 
-**Independence.** Independence is checked at `claim` (§5.5) against the head at that moment, which cannot change while a chain task is open:
-- **A review task** is refused to the agent that completed `A`, the author, in every round. It is also refused to the agent that completed the head it builds on.
-- **A fix of `A`** is refused to the agent that completed the head, when the head is a review. A reviewer does not fold its own findings.
-- **With two workers**, the author folds and the other worker reviews every round. One reviewer may do several rounds, and a third agent may fold instead.
-- **When nobody may claim the next chain task** (one worker left), `idle-board` reports it to the operator.
+**Independence.** Every agent that works on the chain takes one of two roles for `A`. `claim` checks the roles from the board (§5.5); the head plays no part:
+- **Authors** of `A`: every agent that completed `A` or a fix of `A`.
+- **Reviewers** of `A`: every agent that has claimed a review of `A`. That means it holds a live claim on one, or has a tombstone on one (`complete`, `release`, `reject` or `expired`).
+- **The two rules.** A review task is refused to an author, and a fix of `A` is refused to a reviewer.
+  - No agent reviews text it wrote.
+  - A reviewer never folds, rebases or follows up on the artifact, even when it only released a review that could not build.
+  - One reviewer may do every round: after its own clean review, and after an author's fold.
+- **With two workers**, the author folds and the other worker reviews every round. A third agent may fold instead; it then becomes an author and cannot review a later round.
+- **When nobody may claim the next chain task**, `idle-board` reports it to the operator. That happens when a review is due and every remaining worker is an author, or a fix is due and every remaining worker is a reviewer.
 
 Any change after the last clean review makes the head a fix, so `A` needs another round. That change may be a revise, a rebase after a merge conflict, or a follow-up after the master's own check falls short. A review the master rejects is not a round, and the head falls back to the task before it. The master rejects a review that is too thin, or whose verdict disagrees with its text (§5.6).
 
@@ -206,7 +210,7 @@ Because `NEXT=post-…` appears only while no chain task is open, a repeated wak
   - `--kind` must be a key of the profile's `min_reviews` map. With `--kind K`, a missing `--min-reviews` takes the profile's `min_reviews[K]`, and a lower one is refused: `min_reviews for <K> is at least <n> (profile)`. A slip cannot post a spec with fewer reviews than the profile asks.
   - A master that leaves out `--kind` entirely still posts an unreviewed task. The skill's plan step (§5.6) is what marks the artifacts.
 - **`claim`** (exit 2, checked in `try_claim`, so every path is covered):
-  - The independence rules of §5.3 are refused with `<agent> wrote <id>; this <review|fix> must come from another agent`, where `<id>` is `A` or the head.
+  - The independence rules of §5.3. A review task claimed by an author is refused with `<agent> wrote part of <A>; its review must come from another agent`. A fix of `A` claimed by a reviewer is refused with `<agent> reviewed <A>; its fixes must come from another agent`.
   - Any chain task of a rejected artifact is refused with `<A> is rejected`, so no new work starts on a dropped artifact.
 - **`complete`** (exit 1, a usage error): a task with `reviews` needs `--verdict clean|findings`, and any other task refuses `--verdict`. This is not exit 2, because the worker skill reads exit 2 from `complete` as a lost lease. Nothing is written when it fails.
 - **`accept`** (exit 2, nothing written):
@@ -230,15 +234,19 @@ Because `NEXT=post-…` appears only while no chain task is open, a repeated wak
   - `post-review`: post `Review <k+1> of <title>` with `--reviews <A>`. The body names `SHA` and where the review goes (§5.3).
   - `post-revise`: post `Revise <title> after review <k>` with `--fixes <A>`. The body names `SHA` and the review's findings.
   - `merge`:
-    1. Run the §6 step 4 review block with `T=<A>` and `SHORT=<SHA>`, then the master's acceptance check.
-    2. On a pass, heartbeat and run `reviews.py --task <A>` again **before** the fast-forward. It must print `NEXT=merge` with the same `SHA`. Otherwise, return to `rip-swarm/integration`, delete the review branch, and act on the new `NEXT`.
-    3. Fast-forward, then accept each id in `CHAIN` in order, then `A`, all with `--integration-sha <NEW_TIP>`. If `accept` still refuses after the fast-forward, report it to the operator and stop. Do not reset integration: the skill never forces, and a worker may already have merged the new tip.
+    1. Run `/swarm-master` §6 step 4, the `OUTCOME=` block, with `T=<A>` and `SHORT=<SHA>`. (That is the skill's §6, not this document's.) On `OUTCOME=merged` it stops with `WORKTREE` on the review branch. Run the master's acceptance check there, as in step 9.
+    2. On a pass, heartbeat and run `reviews.py --task <A>` again **before** step 9's fast-forward command (*Passes*, item 1). It must print `NEXT=merge` with the same `SHA`. Otherwise, return to `rip-swarm/integration`, delete the review branch, and act on the new `NEXT`.
+    3. Run the fast-forward command. In place of *Passes* items 2 and 3, accept each id in `CHAIN` in order, then `A`, all with `--integration-sha <NEW_TIP>`. If `accept` still refuses after the fast-forward, report it to the operator and stop. Do not reset integration: the skill never forces, and a worker may already have merged the new tip.
     4. On a conflict, a shortfall or "not worth pursuing", follow today's steps, with every follow-up posted `--fixes <A>`.
-- **A review task released with `review cannot build on <sha>: conflict`** (§5.7). In that turn:
-  1. Post a rebase with `--fixes <A>` that builds on `SHA`. It is a new head and costs another round.
-  2. Then reject the released review (`--note "superseded by rebase <id>"`).
-  
-  The rebase is posted first, so the reject's own wake finds the chain busy and posts nothing.
+- **A review that cannot build** (§5.7). It shows up in two places:
+  - as `wake task-finished <R> release`, whose note is `review cannot build on <sha>: conflict`. The skill's release handler, today "nothing required", gains this case;
+  - usually also as a message with the same text. `tick` reports messages first, so the message usually arrives first.
+
+  Act on whichever arrives first, and again on the other. When `A` is live and `R` is not rejected yet:
+  1. Post a rebase with `--fixes <A>`, unless the chain already has a fix of `A` that is neither completed nor rejected. Its body names the `<sha>` from the note, not a `SHA` from `reviews.py`, which is not run here: the released review is still open, so it would print `wait`. The body asks for that sha to be merged onto `rip-swarm/integration` and the conflict resolved. The rebase is a new head and costs another round.
+  2. Then reject `R` (`--note "superseded by rebase <id>"`).
+
+  The rebase is posted first, so the reject's own wake finds the chain busy and posts nothing. The second arrival finds `R` rejected and does nothing.
 - **Reject handler.**
   - **`T` is a chain task and `A` is live**, whether the master rejected a review or a worker rejected what it held. After steps 1–4, run `reviews.py --task <T>` and act on `NEXT`. This is also what resumes a master that died between rejecting a review and posting the next round: the reject tombstone is a wake it has not seen yet. Step 2 never replaces a chain task; `reviews.py` posts the next one.
   - **`T` is a reviewed artifact.** Step 4 uses `--cascade`, which rejects its chain along with its `after` dependents (§5.5). A skipped live claim is not a failure: the derived wake returns when that claim ends.
@@ -259,7 +267,7 @@ A task whose inbox file has `reviews` is a review task:
 4. Edit nothing else.
 5. Commit it and run `complete --verdict clean|findings`. The verdict is `clean` only when the review has no finding that needs a change.
 
-A worker's brief still does not travel to the hive; the task body is what tells the claimer to review rather than implement. A worker refused on `claim` goes back to waiting, like any other exit 2 on `claim`. That covers `<agent> wrote <id>` and `<A> is rejected`.
+A worker's brief still does not travel to the hive; the task body is what tells the claimer to review rather than implement. A worker refused on `claim` goes back to waiting, like any other exit 2 on `claim`. That covers `<agent> wrote part of <A>`, `<agent> reviewed <A>` and `<A> is rejected`.
 
 ### 5.8 What stays
 
@@ -274,7 +282,7 @@ A worker's brief still does not travel to the hive; the task body is what tells 
 
 - **Unit tests:**
   - `inbox-add` field rules, including the profile floor and the default from `--kind`;
-  - the independence refusals in `try_claim` (author, head completer, reviewer folding its own findings);
+  - the independence refusals in `try_claim`: an author refused a review; a reviewer refused a fix, whether it completed, released or still holds its review; and the same reviewer allowed a second round after its own clean review;
   - `claim` refused on a chain task of a rejected artifact;
   - `complete --verdict` required and refused;
   - `accept`'s readiness rule, as a table of chains (findings last, clean but short, clean and met, fix after clean, rejected review, `--via` walk stop);
@@ -285,10 +293,12 @@ A worker's brief still does not travel to the hive; the task body is what tells 
 - **Rehearsal cases** (two workers, as the role skills assume):
   - spec with N=2: findings, a revise by the author, clean by the other worker, then accept, with the review sections and dispositions in `rip-swarm/integration`;
   - the author is refused the review, and the reviewer is refused the revise;
+  - N=2 with two clean rounds, both by the same reviewer;
+  - a worker that released a review is refused the rebase, and the author takes it;
   - a takeover mid-chain posts nothing twice;
   - a thin review, or one whose verdict contradicts its text, is rejected and does not count;
   - a master that dies after rejecting a review posts the next round on the reject wake;
-  - a review that cannot build releases, the rebase is posted, and it costs another round;
+  - a review that cannot build releases, the rebase is posted on the sha from its note, and it costs another round. The release wake alone posts it, and the message plus the release together post it once;
   - `reviews.py` is checked again before the fast-forward;
   - rejecting a reviewed artifact while one of its reviews is claimed: the review completes, the derived wake rejects it, and `all-complete` is reached;
   - N=0 is today's path.
@@ -413,3 +423,62 @@ Each finding was checked against the code and the roles spec before it was folde
 | m2. Every task of a kind grows a full chain | Accepted. One artifact per kind unless the goal names more; subtasks stay unkinded and wait `--after` the artifact. | §5.1, §5.6 |
 | m3. `reviews.py` has no row for a review with no verdict | Accepted. It exits 1 with no `NEXT` line, and the master reports it. | §5.4 |
 | n1. "Posted last" does not name a tie-break | Accepted. Posting order is `created_at`, then task id. | §5.3 |
+
+---
+
+## 9. Second review of §5 (2026-09-26) — `b74679a`
+
+**Reviewed tip:** `b74679a` on `feat/min-reviews`. §7 was not re-opened. (The operator pasted this review in chat; it is recorded here as given.)
+
+Revision 2 needs another pass. The §7 fold holds on the reject wake, the fast-forward re-check, the verdict re-read, and the profile floor. The independence rules, as now written, lock out the only legal reviewer in the round the section itself posts when a review comes back clean.
+
+What holds: --cascade and the derived wake cover a rejected artifact's chain, including a review that was still claimed. A chain-task reject runs reviews.py, so a thin review rejected inside the complete handler is resumed from the reject tombstone. reviews.py is run again before the fast-forward, and a refusal after that is reported rather than reset, as the disposition says. A review that cannot merge is released instead of resolved. --kind cannot be posted below the profile. The goal phrase is not read from the message log.
+
+### Critical
+
+#### C1. A clean intermediate round excludes both workers
+
+The findings path is fixed. The author folds, because a fix is refused to the completer of a review head, and the other worker can review the fold.
+
+The other path is N greater than 1 and a clean review before the last round. §5.4 then posts the next review on that review's sha. §5.3 refuses the new review to the author, and also to the agent who completed the head. The head is the clean review, so that agent is the reviewer. With the two workers the rehearsals assume, nobody can claim the next round. idle-board is the only way out.
+
+The same rule lets the reviewer write artifact text whenever the head is not a review. A first review that cannot merge is released, not completed, so the head is still the artifact. The rebase is a fix, and the fix-refusal applies only when the head is a review. If the reviewer claims that rebase, the next review is refused to both of them again.
+
+§5.3 says one reviewer may do several rounds. The claim rule makes that impossible as soon as the previous head is their own review.
+
+Fix. A review is refused to the author of the artifact, and to the completer of the head only when that head is the artifact or a fix. A previous review does not disqualify its author from the next round. A fix of a reviewed artifact is refused to anyone who has completed a review of it, not only when the current head happens to be a review, so a reviewer never takes the rebase or the revise. The author, or an agent who has not reviewed, folds.
+
+### Minor
+
+#### m1. The conflict rebase does not say which sha, and it is not on the release wake
+
+§5.6 posts that rebase "on SHA" in the turn where the review was released. This path does not run reviews.py, so SHA is the field from a line that was not printed. The sha that failed is the one in the release note.
+
+The procedure is also not attached to task-finished release. The base handler for a release is still "nothing required." tick reports a message before a tombstone, so the note usually arrives first. If the release is visible and the message is not, the review is open again and this section does not tell the master to post the rebase.
+
+Fix. On task-finished <R> release, when the note is review cannot build on <sha>: conflict and the artifact is live, post the rebase on that sha, then reject the review. The same turn handles the message if it arrives first.
+
+#### m2. The opening still says a model slip cannot skip the rounds
+
+§5.5 says a post with no --kind is a legal unreviewed task, and only the plan step marks artifacts. That is a slip. The profile floor applies only after --kind is present.
+
+Fix. Say that in §5's opening. The enforced floor is on tasks the master marks, not on every task it posts.
+
+### Nit
+
+#### n1. "§6 step 4" is not this document
+
+The re-check works only if step 1 is the master skill's OUTCOME= block, which stops on the review branch. This document's §6 is the implementation order and has no review block. The skill's later pass path fast-forwards before accept. Running that path as step 1 puts the sha on integration before the re-check.
+
+---
+
+## 10. Dispositions (revision 3, 2026-09-26)
+
+Each finding was checked against revision 2's text before it was folded.
+
+| Finding | Disposition | Where |
+|---|---|---|
+| C1. A clean intermediate round excludes both workers | Accepted, with a stricter rule than the proposed fix. Both lockouts are real. The proposed fix still leaves the second one open: it refuses a fix only to an agent that *completed* a review, so a worker who *released* a review that could not build may take the rebase and then be refused the next review, while the author is refused too. The rule now splits agents into roles and never looks at the head. **Authors** of `A` completed `A` or a fix of `A`. **Reviewers** of `A` hold, or have held, a claim on a review of `A` (live claim or any tombstone). A review is refused to an author, and a fix is refused to a reviewer. One reviewer may do every round, and with two workers the author folds and the other reviews. | §5.3 Independence, §5.5 `claim`, §5.9 |
+| m1. The conflict rebase does not say which sha, and it is not on the release wake | Accepted. The release handler gains the case. The rebase builds on the sha in the release note. Whichever of the release and the message arrives first posts the rebase, unless an open fix of `A` exists, and then rejects the review. The second arrival does nothing. | §5.6, §5.9 |
+| m2. The opening still says a model slip cannot skip the rounds | Accepted. The opening says the floor binds the tasks the master marks, and that a task posted without `--kind` is not an artifact. | §5 opening |
+| n1. "§6 step 4" is not this document | Accepted. Step 1 is `/swarm-master` §6 step 4's `OUTCOME=` block, which stops on the review branch. The acceptance check runs there. The re-check runs before step 9's fast-forward command, and the chain accepts replace *Passes* items 2 and 3. | §5.6 `merge` |
