@@ -4117,7 +4117,23 @@ Append to class `TestPackaging` in `tests/test_packaging.py`:
     def test_master_review_verifies_parents_quietly(self):
         text = self._text("swarm-master")
         self.assertIn('rev-parse -q --verify "$REVIEW^2" || true', text)
-        self.assertIn('SHA=$(git -C "$WORKTREE" rev-parse <sha>)', text)
+        self.assertIn('SHA=$(git -C "$WORKTREE" rev-parse "$SHORT")', text)
+
+    def test_review_state_never_crosses_a_command(self):
+        # Each harness command is a fresh shell: a fence may only read what it assigns.
+        import re
+        for name in self.ROLES:
+            text = self._text(name)
+            self.assertIn("fresh shell", text, name)
+            for block in re.findall(r"```bash\n(.*?)```", text, re.S):
+                for var in ("REVIEW", "TIP", "SHA", "SHORT", "T", "WORKTREE"):
+                    if re.search(rf"\${var}\b", block):
+                        self.assertRegex(block, rf"(^|[\s;]){var}=", f"{name}: ${var} unassigned in\n{block}")
+            review = next(b for b in re.findall(r"```bash\n(.*?)```", text, re.S)
+                          if 'switch -c "$REVIEW"' in b)
+            for needle in ('SHA=$(git -C "$WORKTREE" rev-parse "$SHORT")', "TIP=$(",
+                           'REVIEW="rip-swarm/review-$T"', 'echo "OUTCOME='):
+                self.assertIn(needle, review)
 
     def test_worker_never_sends_its_brief(self):
         self.assertIn('--body "joined"', self._text("swarm-worker"))
@@ -4168,6 +4184,8 @@ python3 "$RS/scripts/join.py" --role worker --harness <harness>
 ```
 
 It prints `KEY=value` lines. Keep `AGENT`, `HIVE`, `WORKTREE`, `BRANCH` and `INTEGRATION`, and use these absolute paths from now on. Tell the operator every `NOTE=` line. On exit 1, report the message and stop.
+
+**Shell variables do not survive between commands.** Claude Code and Grok start each command in a fresh shell. Every command in this skill that uses `$RS`, `$HIVE`, `$AGENT`, `$WORKTREE` or `$BRANCH` must begin with those assignments, using the absolute values `join` printed. For example: `RS=/home/u/.agents/skills/rip-swarm; HIVE=/…/hive-claude-2; AGENT=claude-2; WORKTREE=/…/.worktrees/claude-2; python3 "$RS/scripts/…" …`. A value a command computes (a sha, a tip) is printed by that command. Copy it into the next command; never expect it to be set.
 
 Say hello once, with exactly this body:
 
@@ -4252,7 +4270,11 @@ python3 "$RS/scripts/join.py" --role master --harness <claude-code|grok|…>
 - Exit 2: another master holds the baton. Report the holder and stop.
 - Exit 1: report the message (for example the `op` migration) and stop.
 
-Keep `AGENT`, `HIVE`, `WORKTREE` (the integration worktree) and `INTEGRATION`. Your heartbeat is `python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task orchestrator --agent "$AGENT"`. Run it before every merge, acceptance check and write. While a step is still running, run it again before half the lease has passed (15 minutes).
+Keep `AGENT`, `HIVE`, `WORKTREE` (the integration worktree) and `INTEGRATION`.
+
+**Shell variables do not survive between commands.** Claude Code and Grok start each command in a fresh shell. Every command in this skill that uses `$RS`, `$HIVE`, `$AGENT`, `$WORKTREE` or `$BRANCH` must begin with those assignments, using the absolute values `join` printed. For example: `RS=/home/u/.agents/skills/rip-swarm; HIVE=/…/hive-claude-2; AGENT=claude-2; WORKTREE=/…/.worktrees/claude-2; python3 "$RS/scripts/…" …`. A value a command computes (a sha, a tip) is printed by that command. Copy it into the next command; never expect it to be set.
+
+Your heartbeat is `python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task orchestrator --agent "$AGENT"`. Run it before every merge, acceptance check and write. While a step is still running, run it again before half the lease has passed (15 minutes).
 
 ## 3. Read the project's rules
 
@@ -4288,17 +4310,19 @@ After starting it, end your turn. Only a line that starts with `wake ` is a wake
 
 1. If `$HIVE/accepted/<T>.json` exists, do nothing.
 2. If any task whose inbox file has `"fixes": "<T>"` is neither accepted nor rejected, skip: that follow-up decides `T`. `status.py` shows `(fixes <T>)` next to such tasks.
-3. Read `result_ref` (`rip-swarm/<id>@<sha>`) from `$HIVE/claims/<T>.complete.*.json`. Workers record a short sha, so resolve it to the full id: `SHA=$(git -C "$WORKTREE" rev-parse <sha>)`.
-4. Review it **off** the integration branch. Heartbeat first. Every git command in this section runs as `git -C "$WORKTREE" …`, never from the project root: `rip-swarm/integration` is checked out in `WORKTREE`, so a bare `git switch` elsewhere fails. Run this block as written. It exits 0 on every path, including after a crash:
+3. Read `result_ref` (`rip-swarm/<id>@<sha>`) from `$HIVE/claims/<T>.complete.*.json`. Below, `<sha>` is that short sha.
+4. Review it **off** the integration branch. Heartbeat first. Run this as **one** command, with your values filled into the first line. It exits 0 on every path, including after a crash, and ends with one `OUTCOME=` line:
    ```bash
-   REVIEW=rip-swarm/review-<T>
+   WORKTREE=<WORKTREE>; T=<T>; SHORT=<sha>
+   REVIEW="rip-swarm/review-$T"
+   SHA=$(git -C "$WORKTREE" rev-parse "$SHORT")
    TIP=$(git -C "$WORKTREE" rev-parse rip-swarm/integration)
-   RESUMED=0
    if git -C "$WORKTREE" rev-parse -q --verify MERGE_HEAD >/dev/null; then
-     git -C "$WORKTREE" merge --abort          # a crash mid-merge
+     git -C "$WORKTREE" merge --abort                     # a crash mid-merge
    fi
+   RESUMED=0
    if git -C "$WORKTREE" show-ref --verify --quiet "refs/heads/$REVIEW"; then
-     # Not a merge commit (e.g. just after the abort) means empty here: that is the recreate path, not an error.
+     # Empty when the branch is not a merge (e.g. right after the abort): the recreate path, not an error.
      P1=$(git -C "$WORKTREE" rev-parse -q --verify "$REVIEW^1" || true)
      P2=$(git -C "$WORKTREE" rev-parse -q --verify "$REVIEW^2" || true)
      if [ "$P1" = "$TIP" ] && [ "$P2" = "$SHA" ]; then
@@ -4309,30 +4333,52 @@ After starting it, end your turn. Only a line that starts with `wake ` is a wake
        git -C "$WORKTREE" branch -D "$REVIEW"
      fi
    fi
-   echo "RESUMED=$RESUMED"
+   if [ "$RESUMED" = 1 ]; then
+     OUTCOME=merged
+   else
+     git -C "$WORKTREE" switch -c "$REVIEW" "$TIP"
+     if git -C "$WORKTREE" merge --no-ff --no-edit "$SHA"; then
+       OUTCOME=merged
+     else
+       git -C "$WORKTREE" merge --abort
+       git -C "$WORKTREE" switch rip-swarm/integration
+       git -C "$WORKTREE" branch -D "$REVIEW"
+       OUTCOME=conflict
+     fi
+   fi
+   echo "OUTCOME=$OUTCOME REVIEW=$REVIEW TIP=$TIP SHA=$SHA RESUMED=$RESUMED"
    ```
-   If `RESUMED=1`, the merge is already done: go to step 6. Otherwise:
-   ```bash
-   git -C "$WORKTREE" switch -c "$REVIEW" "$TIP"
-   git -C "$WORKTREE" merge --no-ff --no-edit "$SHA"
-   ```
-   A non-zero exit from that merge means a conflict: go to step 5.
-5. **Conflict:**
-   1. Run `git -C "$WORKTREE" merge --abort`, `git -C "$WORKTREE" switch rip-swarm/integration` and `git -C "$WORKTREE" branch -D "$REVIEW"`.
-   2. Post a rebase task: `inbox.py --hive "$HIVE" --created-by "$AGENT" --fixes <T> --title "Rebase <title> onto rip-swarm/integration" --body "Merge <sha> onto rip-swarm/integration and resolve the conflict; the resolution is the work."`
-   3. Message the worker.
-6. **Merged:** heartbeat, then run the task's acceptance check on the review branch (files under `WORKTREE`).
+   Later commands take `TIP` and `SHA` from this `OUTCOME=` line. They are not set in any new shell.
+5. **`OUTCOME=conflict`.** The block has already aborted the merge, returned `WORKTREE` to `rip-swarm/integration` and deleted the review branch.
+   1. Post a rebase task: `inbox.py --hive "$HIVE" --created-by "$AGENT" --fixes <T> --title "Rebase <title> onto rip-swarm/integration" --body "Merge <SHA> onto rip-swarm/integration and resolve the conflict; the resolution is the work."`
+   2. Message the worker.
+6. **`OUTCOME=merged`.** `WORKTREE` is on `rip-swarm/review-<T>` with the result merged. Heartbeat, then run the task's acceptance check on the files under `WORKTREE`.
    - **Passes:**
-     1. `git -C "$WORKTREE" switch rip-swarm/integration`.
-     2. If `git -C "$WORKTREE" rev-parse HEAD` is still `$TIP`, run `git -C "$WORKTREE" merge --ff-only "$REVIEW"`. Otherwise re-merge onto the new tip and re-check.
-     3. `python3 "$RS/scripts/accept.py" --hive "$HIVE" --agent "$AGENT" --task <T> --integration-sha "$(git -C "$WORKTREE" rev-parse HEAD)"`
-     4. If `$HIVE/inbox/<T>.json` has `"fixes": "<X>"`, run `accept.py … --task <X> --integration-sha "$(git -C "$WORKTREE" rev-parse HEAD)" --via <T>`. Repeat up the chain, and stop when it prints `already accepted`, which is not a failure.
-     5. `git -C "$WORKTREE" branch -d "$REVIEW"`.
+     1. Run as one command:
+        ```bash
+        WORKTREE=<WORKTREE>; T=<T>; TIP=<TIP from the OUTCOME line>
+        git -C "$WORKTREE" switch rip-swarm/integration
+        if [ "$(git -C "$WORKTREE" rev-parse HEAD)" = "$TIP" ]; then
+          git -C "$WORKTREE" merge --ff-only "rip-swarm/review-$T"
+          git -C "$WORKTREE" branch -d "rip-swarm/review-$T"
+          echo "NEW_TIP=$(git -C "$WORKTREE" rev-parse HEAD)"
+        else
+          echo "MOVED: rip-swarm/integration is no longer at $TIP; run step 4 again"
+        fi
+        ```
+     2. `python3 "$RS/scripts/accept.py" --hive "$HIVE" --agent "$AGENT" --task <T> --integration-sha <NEW_TIP>`
+     3. If `$HIVE/inbox/<T>.json` has `"fixes": "<X>"`, run `accept.py … --task <X> --integration-sha <NEW_TIP> --via <T>`. Repeat up the chain, and stop when it prints `already accepted`, which is not a failure.
    - **Falls short:**
-     1. `git -C "$WORKTREE" switch rip-swarm/integration`, then `git -C "$WORKTREE" branch -D "$REVIEW"`. The sha stays only on the worker's branch.
-     2. Post a follow-up with `--fixes <T>`, whose body names `<sha>` to build on and the gap to close.
+     1. Run as one command:
+        ```bash
+        WORKTREE=<WORKTREE>; T=<T>
+        git -C "$WORKTREE" switch rip-swarm/integration
+        git -C "$WORKTREE" branch -D "rip-swarm/review-$T"
+        ```
+        Integration never contained the sha; it stays only on the worker's branch.
+     2. Post a follow-up with `--fixes <T>`, whose body names `<SHA>` to build on and the gap to close.
      3. Do not fix it yourself.
-   - **Not worth pursuing:** `git -C "$WORKTREE" switch rip-swarm/integration`, `git -C "$WORKTREE" branch -D "$REVIEW"`, then `python3 "$RS/scripts/claim.py" reject --hive "$HIVE" --task <T> --agent "$AGENT" --note "<why>"` and cascade (below).
+   - **Not worth pursuing:** run the same two-line command as *Falls short*, then `python3 "$RS/scripts/claim.py" reject --hive "$HIVE" --task <T> --agent "$AGENT" --note "<why>"`, and cascade (below).
    - Every path ends with `WORKTREE` on `rip-swarm/integration`.
 
 ### `wake task-finished <T> release` or `expired`
@@ -4362,7 +4408,7 @@ Nothing is required: the task is back on the board. Read the note, and adjust if
    - follow-ups and `via` links
    - rejects and their cascades
    - open questions
-3. Commit it.
+3. Commit it on the integration branch, as one command: `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add <note path> && git -C "$WORKTREE" commit -m "swarm: synthesis for <goal>"`.
 4. Run `python3 "$RS/scripts/leave.py" --hive "$HIVE" --agent "$AGENT"`. This releases the baton, removes your hive clone and leaves the integration worktree alone.
 5. Do not push. Report to the operator: the branch `rip-swarm/integration`, what it contains, and how to review it (`git log <base>..rip-swarm/integration`).
 ````
@@ -5228,4 +5274,44 @@ The block is introduced with "In `WORKTREE`", and the commands are plain `git sw
 |---------|-------------|-------|
 | M1 | Accepted. The skill resolves the recorded short sha to the full id first (`SHA=$(git -C "$WORKTREE" rev-parse <sha>)`). It reads both parents with `rev-parse -q --verify … \|\| true`, so a non-merge branch yields empty values and takes the recreate path with exit 0. The step is a single block that exits 0 on every path, including after a crash. The rehearsal's `Master.review` uses the same `-q --verify` form, and its workers now record short shas the way `/swarm-worker` does. The resume test therefore exercises the short-to-full comparison. | Task 12 `/swarm-master` §6 steps 3–6; Task 13 `Session.complete`, `Master.review`; Task 12 packaging test `test_master_review_verifies_parents_quietly` |
 | m1 | Accepted, and extended to the worker skill, which had the same unpinned `git merge` lines. Every review, merge, branch, status and commit command in both role skills is `git -C "$WORKTREE" …`. A packaging test enforces it line by line. | Task 12 both skills; `test_role_skill_git_commands_are_pinned_to_the_worktree` |
+
+---
+
+## Plan review (2026-09-26) — `d871ae3`
+
+**Verdict:** needs revision (1 critical, 1 minor).
+**Reviewed tip:** `d871ae3` (`docs: plan revision 2 — fold plan review`) on `feat/roles-and-install`.
+**The two findings at `2db5f7b` are fixed inside the first bash block:** parents are read with `rev-parse -q --verify … || true`, the short result sha is expanded, and the review commands that sit in that block use `git -C "$WORKTREE"`. The findings below are where that block ends.
+
+### Critical
+
+#### C1. The merge that follows a crash check uses shell variables from a different command
+
+Step 3 sets `SHA=$(git -C "$WORKTREE" rev-parse <sha>)` as its own command. Step 4 says to run the next block as written. That block reads `$SHA` and sets `REVIEW`, `TIP` and `RESUMED`, then echoes `RESUMED=`. The merge is a second fence:
+
+```bash
+git -C "$WORKTREE" switch -c "$REVIEW" "$TIP"
+git -C "$WORKTREE" merge --no-ff --no-edit "$SHA"
+```
+
+Claude Code starts each Bash call with a fresh shell: the working directory can carry over, and variables do not. Grok's command tool is a new shell each call as well. Pasted as written, the second fence has an empty `REVIEW`, `TIP` and `SHA`.
+
+On the ordinary path there is no review branch yet, so the first block prints `RESUMED=0` and exits 0. The second fence is what creates the branch and merges. An empty sha is a failed merge, which step 4 tells the model to treat as a conflict: abort, delete, and post a rebase task for a clean result. The same empty `$REVIEW` and `$SHA` are what the conflict, pass, shortfall and reject lines use.
+
+The packaging test only checks that the `SHA=$(…)` string occurs in the file. It does not check that the assignment and the comparison are one script.
+
+**Fix.** One fence from the sha assignment through either "already on the review branch" or the `switch -c` and `merge`. Echo `RESUMED`, `SHA` and `REVIEW` at the end. The acceptance check stays a model step. Every later fence repeats `REVIEW=rip-swarm/review-<T>` and uses the sha from that echo, not `$SHA` from a previous call.
+
+### Minor
+
+#### m1. Finish still says "Commit it"
+
+Section 6 pins `git -C "$WORKTREE"`. Section 7 is outside that sentence, and the synthesis step is the word "Commit it" with no command. A commit from the project root does not add the note on `rip-swarm/integration`, which is checked out in `WORKTREE`. The line the operator is told to run, `git log <base>..rip-swarm/integration`, then does not show the synthesis. Pin it the same way as the worker's step 4: `git -C "$WORKTREE" add` the note and `git -C "$WORKTREE" commit`.
+
+### Dispositions (plan revision 3)
+
+| Finding | Disposition | Where |
+|---------|-------------|-------|
+| C1 | Accepted, and widened. The review is a single command that resolves the sha, handles a crash, creates and merges or resumes, and aborts on a conflict. It ends with `OUTCOME=merged|conflict REVIEW= TIP= SHA= RESUMED=`. The pass and drop paths are their own self-contained commands that take `TIP`/`SHA` from that line. The same fresh-shell problem also applied to `$RS`, `$HIVE`, `$AGENT` and `$WORKTREE` throughout both skills, so each skill now states the rule once: begin every command with the assignments `join` printed. A packaging test checks that no fenced command reads `REVIEW`, `TIP`, `SHA`, `SHORT`, `T` or `WORKTREE` without assigning it, and that the review fence holds the resolution, the tip, the branch name and the `OUTCOME` echo. | Task 12 `/swarm-master` §2 and §6; `/swarm-worker` §2; `test_review_state_never_crosses_a_command` |
+| m1 | Accepted. The synthesis is committed with `git -C "$WORKTREE" add … && git -C "$WORKTREE" commit …` on `rip-swarm/integration`. | Task 12 `/swarm-master` §7 step 3 |
 
