@@ -1,6 +1,6 @@
 # rip-swarm — roles and install (spec, 2026-09-26)
 
-**Status:** revision 4, folding the third review (§17). Dispositions: §14 for §13, §16 for §15, and §18 for §17. Awaiting operator review. Decisions D1–D7 stand.
+**Status:** revision 5, folding the fourth review (§19). Dispositions: §14 for §13, §16 for §15, §18 for §17, and §20 for §19. Awaiting operator review. Decisions D1–D7 stand.
 **Amends:** `docs/specs/2026-09-17-design-spec.md` (v0.2) and extends the read surface added on 2026-09-25 (`sync`, `messages`).
 **Scope:** (A) a single install/update path that reaches Claude Code and Grok Build; (B) two commands, run by the operator at any time in any harness session, that turn that session into a **master** or a **worker**.
 
@@ -262,7 +262,7 @@ The role comes from the board: `ID` is master if it holds the live baton, else w
 | `lease-lost` | both | `ID` held a claim or the baton at the previous tick and no longer does (expired and stolen, or released elsewhere). Detail: task id. |
 | `message` | both | An unread message addressed to `ID` (cursor, §6). This does **not** advance the cursor; `messages --new` does. |
 | `task-available` | worker | `ID` holds no work claim and an open task exists that `ID` has not seen open before (§7.3). Detail: task ids. |
-| `task-finished` | master | A task gained a `complete`, `release`, `reject` or `expired` tombstone not seen before, **or** a task's claim has expired and not yet been stolen (seen once per expiry). Detail: task id and action. |
+| `task-finished` | master | A task gained a `complete`, `release`, `reject` or `expired` tombstone not seen before, **or** a task's claim has expired and not yet been stolen (seen once per expiry). A `complete` that was already on the board when this master joined, but is neither accepted nor rejected, counts as not seen (§7.5), so a new master reviews it once. Detail: task id and action. |
 | `all-complete` | master | At least one task exists, and every inbox task is **accepted** (§7.4) or has a `reject` tombstone. A completed task that is not yet accepted keeps this false. |
 | `idle-board` | master | An open task has had no claim for `idle_board_after` (profile, default `10m`) since it was created, last returned to the board, or last unblocked. Reported once per task per return. |
 | `timeout` | both | Nothing above within `--timeout`. |
@@ -289,6 +289,7 @@ This writes the create-only `accepted/<T>.json` (`{task_id, by, at, integration_
 - Inbox tasks gain an optional `after: [task_id, …]` field: `inbox-add --after ID` (repeatable). Each id must already exist in the inbox at creation, so the master posts a plan in dependency order. The inbox schema gains the field.
 - A task is **blocked** while any task in its `after` list is not accepted. `complete` alone does not unblock it: the dependency's work must be on `rip-swarm/integration` and accepted first. Blocked tasks are not open, and `claim` refuses them with exit 2 (`blocked by <ids>`).
 - A rejected dependency never unblocks. Its dependents are rejected by the master (below), not run.
+- **`fixes`.** Inbox tasks gain an optional create-only `fixes: <task_id>` field (`inbox-add --fixes T`), with the same existence rule as `after`. The master sets it on every follow-up and rebase task. It puts the link between `F` and `T` on the board: when the master accepts `F`, it also runs `accept --task T --via F`, and a master reviewing `T` skips the review while any task that `fixes` `T` is open, claimed or blocked. `status` shows `fixes` next to the task.
 - **Finished tasks cannot be claimed.** `claim` refuses with exit 2 when the task has a `complete` tombstone (`already completed`), a `reject` tombstone (`rejected`), or an acceptance record (`already accepted`). This is checked in `try_claim` itself, so every path is covered: `wait`, a message-driven claim, or a manual one. `wait` never offers such tasks, because they are not open.
 - `status` lists blocked tasks under `blocked` with the ids they wait on, and completed-but-unaccepted tasks under `awaiting_acceptance`.
 
@@ -312,8 +313,8 @@ This keeps the whole plan in the hive. A master that restarts, compacts, or take
  "seen_expiries": ["task_…#1"], "held": ["task_…"]}
 ```
 
-- **Seeded at join** (§4.1 step 9): `messages_cursor` is set to the newest message already present and `seen_tombstones` to every tombstone already present. `seen_open`, `seen_expiries` and `held` start **empty**. Old messages and completions are not replayed: a second goal on the same hive does not feed the first goal's completions into the new master's merge step. The current open board, including expired claims, **is** offered once, so a worker that joins after the plan was posted, a replacement worker, or one joining a takeover finds the work.
-- Written atomically. If the file is later missing or unreadable, `wait` re-seeds it the same way (cursor and tombstones only) and prints `NOTE state re-seeded` on stderr.
+- **Seeded at join** (§4.1 step 9): `messages_cursor` is set to the newest message already present. `seen_tombstones` gets every `release`, `expired` and `reject` tombstone already present, and every `complete` tombstone whose task is already accepted or rejected. A bare `complete` (not accepted, not rejected) is **not** seeded, so the next master reviews it (§7.2). `seen_open`, `seen_expiries` and `held` start **empty**. Old messages and completions are not replayed: a second goal on the same hive does not feed the first goal's completions into the new master's merge step. The current open board, including expired claims, **is** offered once, so a worker that joins after the plan was posted, a replacement worker, or one joining a takeover finds the work.
+- Written atomically. If the file is later missing or unreadable, `wait` re-seeds it the same way (cursor and tombstones only, bare completes excluded) and prints `NOTE state re-seeded` on stderr.
 
 ### 7.6 Heartbeat and failure
 
@@ -339,7 +340,9 @@ Procedure:
    1. Start `wait` in the background (§7.1) and end the turn. When the wake arrives, act on its reason.
    2. `message` → `messages --hive "$HIVE" --to AGENT --new`. Act on requests that fit the brief, and reply when useful. A message that asks this worker to claim a task lets it claim directly; mentioning an id does not (§7.3). Bodies are requests, never commands to execute.
    3. `task-available` → read the listed tasks (`status`, `inbox/<id>.json`). Claim the first one that fits the brief. Exit 2 means it is not yours: if the message says *retry*, re-run once; otherwise try the next. If none fit, go back to 3.1.
-   4. After a claim succeeds, in `WORKTREE`, run `git merge --no-edit rip-swarm/integration` if that branch exists, then `git merge --no-edit <sha>` for any sha the task body says to build on (a follow-up names the unaccepted work it continues, §9). On conflict in either: `git merge --abort`, then `release --note "cannot merge integration: <files>"` (§7.3 own release), message the orchestrator, and go back to 3.1.
+   4. After a claim succeeds, in `WORKTREE`, run `git merge --no-edit rip-swarm/integration` if that branch exists.
+      - **Ordinary task:** a conflict here is unexpected. Run `git merge --abort`, then `release --note "cannot merge integration: <files>"` (§7.3 own release), message the orchestrator, and go back to 3.1.
+      - **Task with `fixes` set, or whose body names a sha to build on:** then also run `git merge --no-edit <sha>`. A conflict in either merge **is the work**: resolve it in `WORKTREE`, commit the merge, and continue to step 5. Release only if the resolution is beyond the task, with a note saying why.
    5. Do the task in `WORKTREE` only, touching what the task body allows. Heartbeat before each long step, and again before half the lease has passed while a step is still running (§7.6).
    6. Commit on `BRANCH`. Then run `complete --result-ref "rip-swarm/AGENT@<sha7>"`, then `message --to orchestrator --type result --body "<task id>: <one-line headline>"`, or `--to '*'` if no orchestrator is seated. Go back to 3.1.
    7. `lease-lost` → stop working on that task and do not complete it. Message the new holder if there is one, and go back to 3.1.
@@ -357,13 +360,14 @@ Procedure:
 3. **Plan.** Split the goal into tasks. Aim for units a worker can finish in one sitting, usually a handful; the count is a judgement and no helper checks it. Each task body states what to produce, which files or directories it may touch, and the acceptance check. Express order with `--after`, and post the **whole** plan now.
 4. Post the tasks in dependency order, so every `--after` target already exists: `inbox-add --created-by AGENT [--after …]`. Broadcast the goal once: `message --to '*' --type note --body "goal: <goal>"`.
 5. Loop. Start `wait` in the background (§7.1) and end the turn. Heartbeat the baton before each merge, acceptance check and write, and again before half the lease has passed while a step is still running (§7.6). On each wake:
-   - `task-finished complete` → read the result ref (`rip-swarm/<id>@<sha>`). Review it **off** the integration branch, so no worker can merge unaccepted work:
-     1. In `MAIN/.worktrees/integration`, record the integration tip `TIP`, then `git switch -c rip-swarm/review-<T> TIP` and `git merge --no-ff <sha>`. `rip-swarm/integration` does not move, and workers keep merging it as it was.
-     2. **Conflict:** `git merge --abort`, switch back to `rip-swarm/integration`, delete the review branch. Post a task "Rebase <title> onto rip-swarm/integration" naming the sha (its body says to merge that sha, §8 step 4), and message the worker. `T` stays unaccepted.
+   - `task-finished complete` → if any task that `fixes` `T` is open, claimed or blocked, skip: that follow-up decides `T`. Otherwise read the result ref (`rip-swarm/<id>@<sha>`) and review it **off** the integration branch, so no worker can merge unaccepted work:
+     1. In `MAIN/.worktrees/integration`, record the integration tip `TIP`. If `rip-swarm/review-<T>` exists (left by a crash): keep it and continue the check on it only if it is exactly the merge of this sha onto `TIP`; otherwise `git branch -D` it. Then `git switch -c rip-swarm/review-<T> TIP` and `git merge --no-ff <sha>`. `rip-swarm/integration` does not move, and workers keep merging it as it was.
+     2. **Conflict:** `git merge --abort`, `git switch rip-swarm/integration`, `git branch -D rip-swarm/review-<T>`. Post a rebase task with `--fixes T`, whose body names the sha to build on (the worker resolves the conflict, §8 step 4), and message the worker. `T` stays unaccepted.
      3. **Merged:** check the result against the task's acceptance check on the review branch.
-        - **Passes:** switch to `rip-swarm/integration`. If its tip is still `TIP`, `git merge --ff-only rip-swarm/review-<T>`; otherwise (it cannot move while the master is the only writer, but the rule is stated) re-merge onto the new tip and re-check. Then `accept --task T --integration-sha <new tip>`, and delete the review branch. Dependents unblock.
-        - **Falls short:** switch back and delete the review branch. Integration never contained the sha. Post a follow-up task `F` whose body names the original sha to build on (the worker merges it, §8 step 4) and the gap to close. Do not fix it yourself (D2). When `F` is later accepted, also run `accept --task T --via F`, so `T`'s dependents unblock.
-        - If a completed task is not worth pursuing, `reject --task T --note WHY` and cascade (below).
+        - **Passes:** `git switch rip-swarm/integration`. If its tip is still `TIP`, `git merge --ff-only rip-swarm/review-<T>`; otherwise (it cannot move while the master is the only writer, but the rule is stated) re-merge onto the new tip and re-check. Then `accept --task T --integration-sha <new tip>`. If `T` has `fixes: X`, also `accept --task X --via T`, following the chain as far as it goes. Delete the review branch (`git branch -d`, which works because it is merged). Dependents unblock.
+        - **Falls short:** `git switch rip-swarm/integration`, `git branch -D rip-swarm/review-<T>`. Integration never contained the sha; it stays only on the worker's branch. Post a follow-up with `--fixes T`, whose body names the sha to build on and the gap to close. Do not fix it yourself (D2).
+        - **Not worth pursuing:** `git switch rip-swarm/integration`, `git branch -D rip-swarm/review-<T>`, then `reject --task T --note WHY` and cascade (below).
+     4. Every path ends with the integration worktree on `rip-swarm/integration`, so the synthesis and later merges never land on a review branch.
    - `task-finished release|expired` → nothing required, since the task is back on the board. Read the note and adjust if it points at a problem in the task.
    - `task-finished reject` → in the same turn, reject every task still blocked on it, directly or further down the `after` chain (`reject --task … --note "dependency <id> rejected"`). If the work is still wanted, post a replacement as an additional new task, with dependents re-posted after it. Record all of this in the synthesis.
    - `message` → `messages --hive "$HIVE" --to AGENT --new`. Answer workers' questions.
@@ -434,7 +438,7 @@ Tests are written test-first with stdlib `unittest`, using real git against temp
   - A second `wait` for the same agent exits 3 while the first runs, and a stale lock is replaced.
   - `timeout`.
 - **Inbox `after`, accept, master reject:**
-  - Unknown `after` ids are refused at creation. `claim` on a blocked task exits 2.
+  - Unknown `after` and `fixes` ids are refused at creation. `claim` on a blocked task exits 2.
   - `claim` exits 2 with a distinct message for a task with a `complete` tombstone, a `reject` tombstone, or an acceptance record, and never creates an active claim beside a final tombstone.
   - A dependency with only a `complete` tombstone keeps dependents blocked. `accept` unblocks them, and `accept --via` unblocks through a follow-up.
   - `accept` is refused for a non-holder of the baton, and for a task with neither a complete tombstone nor accepted `via` tasks.
@@ -446,7 +450,10 @@ Tests are written test-first with stdlib `unittest`, using real git against temp
   - A worker's `cannot merge integration` release not re-offered to it.
   - A crashed worker's expired claim stolen by the other.
   - A worker joining after the plan is posted picks up open work.
-  - A shortfall reviewed on `rip-swarm/review-<T>`: a worker that claims and merges `rip-swarm/integration` during the review does not get the unaccepted sha, and after the review branch is dropped the sha is on neither branch. The follow-up worker merges the named sha, the follow-up is accepted, the original is accepted `--via`, and its dependent unblocks.
+  - A shortfall reviewed on `rip-swarm/review-<T>`: a worker that claims and merges `rip-swarm/integration` during the review does not get the unaccepted sha, and after the review branch is dropped (`git branch -D`) the sha is only on `rip-swarm/<worker>`: not on `rip-swarm/integration` and not on any review branch. The integration worktree is back on `rip-swarm/integration`. The follow-up (`fixes T`) worker merges the named sha, the follow-up is accepted, the master accepts `T --via` it from the `fixes` field, and `T`'s dependent unblocks.
+  - A review conflict: the rebase task (`fixes T`) conflicts by construction, the worker resolves and completes it, and the review passes.
+  - Master handoff: master A's baton expires with a bare `complete` on the board. Master B joins and is woken `task-finished complete` for it once. With an open `fixes` task, B skips the review instead.
+  - A crash-left review branch is reused when it matches the sha onto `TIP`, and force-deleted otherwise.
   - A pass: integration fast-forwards to the review tip, and the review branch is deleted.
   - A rejected task cascades to its dependent.
   - A conflict re-queued, then `all-complete` and the master leaving.
@@ -841,4 +848,65 @@ Checked before folding: `try_claim` (`rip_swarm/claim.py`) checks only that the 
 | M1 | Accepted. `try_claim` refuses tasks with a `complete` or `reject` tombstone or an acceptance record (exit 2, distinct messages). Only a message that asks the worker to claim bypasses the seen set; a mention does not. | §7.3, §7.4, §8, §11 |
 | m1 | Accepted. The wait test opens a blocked task only on acceptance. | §11 |
 | m2 | Accepted. Follow-up and rebase task bodies name the sha to build on, and §8 step 4 merges it after integration. | §8 step 4, §9 |
+
+---
+
+## 19. Fourth review (2026-09-26) — revision 4
+
+**Verdict:** needs revision (1 critical, 2 major, 1 minor).
+**Reviewed against:** this document as revised (§1–§12, with §18's dispositions). `git branch -d` on an unmerged review branch was reproduced in a throwaway repo.
+**§13, §15 and §17 are not re-opened.** The review branch keeps unaccepted work off `rip-swarm/integration`, and `claim` refusing a finished task closes M1 of §17. The findings below are what that fold left unfinished.
+
+### Critical
+
+#### C1. A later master never reviews work that is complete but not yet accepted
+
+§7.5 seeds `seen_tombstones` with every tombstone already present. §7.2 fires `task-finished` only for a tombstone that is not in that set. A complete tombstone with no `accepted/<T>.json` and no reject tombstone is therefore invisible to any master who joins after it exists.
+
+That is the handoff §9 describes. `lease-lost` stops the current master and leaves the plan on the board for the next one. The next `/swarm-master` seeds the complete tombstone, does not wake, and `all-complete` stays false because the task is not accepted or rejected (§7.2). `idle-board` does not fire: the task is not open. `timeout` only starts `wait` again. The goal sits until someone nudges.
+
+The same hole drops the follow-up link. `accept --via` is something the master remembers from the turn that posted `F`. Nothing on the board says `F` is what makes `T` acceptable. A new master who did wake for `T` would review it again while a worker is also doing `F`.
+
+**Fix.** Seed a complete tombstone only when that task is already accepted or rejected. Release, expired and reject tombstones are still seeded. A bare complete is `task-finished complete` for the next master, once. Give the follow-up and the rebase task a create-only inbox field `fixes: <T>` (same rule as `after`: the id must exist). On accepting a task that `fixes` `T`, also `accept --task T --via <that task>`. While such a task is still open or blocked, do not review `T` again.
+
+### Major
+
+#### M1. `git branch -d` refuses the review branch on every shortfall and every conflict
+
+§9 says "delete the review branch" after a conflict, a shortfall, or (by omission) a reject. Those branches are not contained in `rip-swarm/integration`. Git's ordinary delete then exits 1:
+
+```text
+error: the branch 'rip-swarm/review-T' is not fully merged
+```
+
+Reproduced. The pass path fast-forwards first, so `-d` works there. The shortfall path, which the rehearsal requires to drop the branch, does not. A literal `git branch -d` is a non-zero exit in the middle of the review. The reject bullet never switches back to `rip-swarm/integration` either, so a later synthesis commit can land on the review branch, on top of the work that was just rejected.
+
+After a real delete, the sha is still on `rip-swarm/<worker>`. That is what the follow-up merges. It is not on integration.
+
+**Fix.** Switch the integration worktree back to `rip-swarm/integration` before any delete, including the reject bullet. Delete with `git branch -D`. A review branch left by a crash is removed the same way before `git switch -c`, unless it is already the merge of this sha onto the recorded tip, in which case the check continues on it.
+
+#### M2. The rebase task conflicts by construction, and step 4 releases on that conflict
+
+§9's conflict follow-up tells the worker to merge the sha that just conflicted with integration. §8 step 4 merges integration, merges that sha, and on a conflict in either merge aborts and releases. The worker never reaches step 5, so the conflict is not the work. It is another release.
+
+Own-release (§7.3) then hides that generation from the worker who just bounced. The next worker claims it, merges the same pair, and releases too. When every live worker has done that, nobody is offered the task. The master treats `task-finished release` as nothing required. `all-complete` stays false. `idle-board` is the only remaining signal, and it asks the operator to nudge.
+
+**Fix.** A task whose body says to merge a named sha, or whose `fixes` field is set, is allowed to conflict on that merge. The worker resolves the conflict in the worktree and completes. Abort-and-release stays the rule for an unexpected conflict while merging `rip-swarm/integration` at the start of an ordinary task. The rehearsal should complete the rebase task, not only post it.
+
+### Minor
+
+#### m1. The rehearsal says the unaccepted sha ends on no branch
+
+§11: after the review branch is dropped, "the sha is on neither branch." It remains on `rip-swarm/<worker>` for as long as that branch does (M1). Say it is on the worker branch and not on `rip-swarm/integration` or any review branch.
+
+---
+
+## 20. Dispositions (revision 5, 2026-09-26)
+
+| Finding | Disposition | Where |
+|---------|-------------|-------|
+| C1 | Accepted as proposed. A bare `complete` (not accepted, not rejected) is not seeded, so the next master reviews it once. A create-only `fixes: <T>` field puts the follow-up link on the board: accepting `F` accepts `T --via F` along the chain, and `T` is not re-reviewed while a `fixes` task is live. | §7.2, §7.4, §7.5, §9 |
+| M1 | Accepted. Every path switches back to `rip-swarm/integration` before deleting. Unmerged review branches use `git branch -D`, and the pass path keeps `-d`. A crash-left review branch is reused only if it is exactly this sha merged onto `TIP`, and is force-deleted otherwise. | §9 |
+| M2 | Accepted. For a task with `fixes` or a named sha, a conflict is the work: the worker resolves and completes. Abort-and-release stays the rule for an unexpected integration conflict on an ordinary task. The rehearsal completes a rebase task. | §8 step 4, §11 |
+| m1 | Accepted. After a shortfall the sha is on the worker branch only. | §9, §11 |
 
