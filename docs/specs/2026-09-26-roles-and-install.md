@@ -1,6 +1,6 @@
 # rip-swarm — roles and install (spec, 2026-09-26)
 
-**Status:** approved in conversation on 2026-09-26; this document is the written spec awaiting review.
+**Status:** revision 2, folding the review in §13; dispositions in §14. Awaiting operator review. Decisions D1–D7 stand.
 **Amends:** `docs/specs/2026-09-17-design-spec.md` (v0.2) and extends the read surface added on 2026-09-25 (`sync`, `messages`).
 **Scope:** (A) a single install/update path that reaches Claude Code and Grok Build; (B) two commands, run by the operator at any time in any harness session, that turn that session into a **master** or a **worker**.
 
@@ -8,27 +8,40 @@
 
 ## 1. Intent
 
-The operator types one command in a harness session and that session joins the swarm and runs its role loop with no manual hive commits, no hand-made worktrees and no nudging while it waits. Installing is one command; updating is one command.
+The operator types one command in a harness session. That session joins the swarm and runs its role loop, with no manual hive commits, no hand-made worktrees and no nudging while it waits. Installing is one command, and so is updating.
 
-**Success looks like:** on a project with no hive yet, the operator runs `/swarm-master <goal>` in one session and `/swarm-worker` in two others (any mix of Claude Code and Grok), and gets back a `swarm/integration` branch holding the merged, reviewed result plus a synthesis note, having typed nothing else.
+**Success looks like:** on a project with no hive yet, the operator runs `/swarm-master <goal>` in one session and `/swarm-worker` in two others (any mix of Claude Code and Grok). They get back a `rip-swarm/integration` branch holding the merged, reviewed result plus a synthesis note, having typed nothing else.
 
 ### Decisions (operator, 2026-09-26)
 
 | # | Decision |
 |---|----------|
-| D1 | Approach: thin role skills over new deterministic helpers (`join`, `wait`, `leave`, unread cursors). Not prose-only skills; not an external supervisor. |
-| D2 | Master is **coordinator only**: splits a goal into tasks, answers messages, merges and reviews results, writes the synthesis. It never claims work tasks. |
+| D1 | Approach: thin role skills over new deterministic helpers (`join`, `wait`, `leave`, unread cursors). Not prose-only skills, and not an external supervisor. |
+| D2 | Master is **coordinator only**: it splits a goal into tasks, answers messages, merges and reviews results, and writes the synthesis. It never claims work tasks. |
 | D3 | Each worker edits in its **own git worktree** on its own branch, created by `join`. |
-| D4 | Worker ids are **assigned automatically**; workers join and leave at any time. |
+| D4 | Worker ids are **assigned automatically**. Workers join and leave at any time. |
 | D5 | **Master merges** completed work into one integration branch. Nothing is pushed except the hive branch `origin/swarm`. |
-| D6 | Optional free text on join (e.g. "reviewer specialist, do not implement") is **worker-side judgement only**: not stored in the hive, not sent to the master, not checked by any helper. |
-| D7 | Invoking a role command is the operator's authority: the session may register itself and (master) take the baton without a manual hive commit. |
+| D6 | Optional free text on join (e.g. "reviewer specialist, do not implement") is **worker-side judgement only**. It is not stored in the hive, not sent to the master, and not checked by any helper. |
+| D7 | Invoking a role command is the operator's authority. The session may register itself and, as master, take the baton without a manual hive commit. |
 
 ### Assumptions (stated, not asked)
 
-- One machine. Worktrees and branches share the project's `.git`; worker branches are never pushed. Cross-machine is out of scope (§12).
+- One machine. Worktrees and branches share the project's `.git`, and worker branches are never pushed. Cross-machine is out of scope (§12).
 - One active goal per hive at a time.
 - Linux/macOS, Python 3.10+, stdlib only (unchanged).
+
+### Names
+
+| Thing | Name |
+|-------|------|
+| Hive branch (remote only) | `origin/swarm` (unchanged) |
+| Worker branch | `rip-swarm/<id>` |
+| Integration branch | `rip-swarm/integration` |
+| Worker worktree | `MAIN/.worktrees/<id>` |
+| Integration worktree | `MAIN/.worktrees/integration` |
+| Agent hive clone | `<common-dir>/rip-swarm/hive-<id>` |
+
+The project-side prefix is `rip-swarm/`, not `swarm/`. A local branch named `swarm` (for example after `git switch swarm` once `origin/swarm` exists) would make every `swarm/*` ref uncreatable. `join` still refuses if `refs/heads/rip-swarm` exists, and names the branch to rename (§4.3).
 
 ---
 
@@ -36,7 +49,7 @@ The operator types one command in a harness session and that session joins the s
 
 ### 2.1 Repository layout
 
-The repo becomes a multi-skill package discoverable by the `skills` CLI (`npx skills`), which finds `skills/*/SKILL.md` when there is no root `SKILL.md`:
+The repo becomes a multi-skill package that the `skills` CLI (`npx skills`) can discover. The CLI finds `skills/*/SKILL.md` only when there is no root `SKILL.md`:
 
 ```
 skills/
@@ -54,57 +67,58 @@ docs/                   # stays at repo root
 README.md
 ```
 
-- The root `SKILL.md` moves to `skills/rip-swarm/SKILL.md`. `_DEFAULT_TEMPLATE` and the `sys.path` shim in `scripts/*.py` keep working because they are relative to their own files.
-- Tests run as `PYTHONPATH=skills/rip-swarm python3 -m unittest discover -s tests`.
-- `rip_swarm/__init__.py` carries `__version__`; `rip-swarm version` prints it. Installed copies have no `.git`, so this is the only way to tell versions apart. `join` prints it too.
-- Role skills set `disable-model-invocation: true` and an `argument-hint`; both harnesses honour these (Claude Code natively; Grok per `~/.grok/docs/user-guide/08-skills.md`).
+- The root `SKILL.md` moves to `skills/rip-swarm/SKILL.md`, and no root `SKILL.md` may remain: it would shadow the three skills. `_DEFAULT_TEMPLATE` and the `sys.path` shim in `scripts/*.py` keep working because they are relative to their own files.
+- Tests run as `PYTHONPATH=skills/rip-swarm python3 -m unittest discover -s tests`. Tests that read `ROOT/SKILL.md` or `ROOT/scripts/` move to the new paths.
+- `rip_swarm/__init__.py` carries `__version__`, and `rip-swarm version` prints it. Installed copies have no `.git`, so this is the only way to tell versions apart. `join` prints it too.
+- Role skills set `disable-model-invocation: true` and an `argument-hint`. Both harnesses honour these: Claude Code natively, Grok per `~/.grok/docs/user-guide/08-skills.md`.
 
 ### 2.2 Commands
 
 ```bash
 # install once (user-level, both harnesses)
 npx skills add esjaysmith/rip-swarm -g -a claude-code -a grok -s '*' -y
-# update
-npx skills update -g
+# update only this package
+npx skills update rip-swarm swarm-master swarm-worker -g
 ```
 
 The CLI keeps the canonical copy in `~/.agents/skills/<name>/`, symlinks it into `~/.claude/skills/` and `~/.grok/skills/`, and records it in `~/.agents/.skill-lock.json`.
 
 ### 2.3 Locating the runtime from a role skill
 
-Role skills run helpers from the sibling `rip-swarm` skill. Resolution order, stated in each role SKILL.md:
+Role skills run helpers from the sibling `rip-swarm` skill. Each role SKILL.md states this resolution order:
 
-1. `<this skill's base directory>/../rip-swarm` (both harnesses expose the skill's base directory; installed skills are siblings in every location the CLI writes).
+1. `<this skill's base directory>/../rip-swarm`. Both harnesses expose the skill's base directory, and installed skills are siblings in every location the CLI writes.
 2. `~/.agents/skills/rip-swarm`.
-3. Otherwise stop and tell the operator to run the install command.
+3. Otherwise, stop and tell the operator to run the install command.
 
-The resolved directory is `RS` below; every helper call is `python3 "$RS/scripts/<name>.py" …`.
+The resolved directory is `RS` below. Every helper call is `python3 "$RS/scripts/<name>.py" …`.
 
 ---
 
 ## 3. Membership and identity
 
-### 3.1 Member files replace self-registration in `registry.yaml`
+### 3.1 Member files beside `registry.yaml`
 
-`agents/registry.yaml` stays operator-curated (it holds `op`). Session identities live in create-only member files, so concurrent joins never co-edit one file:
+`agents/registry.yaml` stays operator-curated and holds `op`. Session identities live in create-only member files, so concurrent joins never co-edit one file:
 
 ```
-agents/<id>/member.json                    # {id, harness, role: "worker", joined_at}
-agents/<id>/member.left.<UTC stamp>.json   # tombstone written by leave
+agents/<id>/member.json                        # {id, harness, role: "worker", joined_at}
+agents/<id>/member.left.<YYYYMMDDTHHMMSSZ>.json  # tombstone written by leave (claim stamp form)
 ```
 
-- `member.json` is created with `O_CREAT|O_EXCL` and published with the claim publish loop: **first push wins**. An add/add conflict on it means another session took that id (§3.2).
-- `registry.load_registry(hive)` returns `registry.yaml` entries **plus** active members (a `member.json` with no `member.left.*` beside it). `require_agent` is unchanged, so every existing trust gate (claim, message `--from`/`--to`, promote, harness match) now covers members.
+- `member.json` is created with `O_CREAT|O_EXCL` and published so that **the first push wins**. An add/add conflict on exactly that path means another session took the id (§3.2). A JSON Schema `docs/specs/schema/member.schema.json` sits beside the others.
+- `registry.load_registry(hive)` returns `registry.yaml` entries **plus** active members, meaning a `member.json` with no `member.left.*` beside it. `require_agent` is unchanged, so every existing trust gate (claim, message `--from`/`--to`, promote, harness match) now covers members.
 - A new `registry.known_agents(hive)` returns active **and left** member ids plus `registry.yaml` ids. `status` uses it for `unknown_agents`, so claims and messages by a departed session never read as unknown.
 - A left member is not in `load_registry`: it can no longer claim, heartbeat, complete or send. Its expired claims are stealable as usual.
-- `member.json` never changes after creation. Last activity is derived (§7), not written.
-- Member role is always `worker` in the file. "Master" is not an id or a registry role: it is whoever holds the orchestrator baton (`claims/orchestrator.json`), exactly as in v0.2.
+- `member.json` never changes after creation. Last activity is derived (§10), not written.
+- The member role is always `worker` in the file. "Master" is not an id or a registry role: it is whoever holds the orchestrator baton (`claims/orchestrator.json`), exactly as in v0.2.
 
 ### 3.2 Id assignment
 
-- Id = `<short>-<n>`, where `short` is the harness up to its first `-` (`claude-code` → `claude`, `grok` → `grok`) and `n` is 1 + the highest `n` for that `short` across **all** member files, active or left. Ids are never reused.
-- On a lost race (another session pushed the same `member.json` first) `join` resets to the remote tip, recomputes `n` and retries, at most 5 times.
-- The harness string is supplied by the skill (`claude-code` for Claude Code, `grok` for Grok Build; any other harness uses its lowercase product name). It is recorded in `member.json` and matched by every later helper call as today.
+- The id is `<short>-<n>`. `short` is the harness up to its first `-` (`claude-code` → `claude`, `grok` → `grok`), lowercased, with anything outside `[a-z0-9_]` dropped. It must match `registry._AGENT_ID` and is never `op`; a harness that reduces to `op` or to nothing uses `agent`.
+- `n` is 1 + the **integer** maximum `n` for that `short` across all member files (active or left) **and** all `registry.yaml` ids of the form `<short>-<digits>`. Ids are never reused. An id that exists only in `registry.yaml` is never allocated, so `load_registry` never sees a duplicate.
+- **Race.** A new `publish_member` wraps `publish` and treats a rebase conflict on exactly `agents/<id>/member.json` as `MemberTaken`. The caller resets to the remote tip, recomputes `n` and retries, at most 5 times. Any other rebase failure remains `GitopsError`, exit 1.
+- The skill supplies the harness string: `claude-code` for Claude Code, `grok` for Grok Build, and the lowercase product name for any other harness. It is recorded in `member.json` and matched by every later helper call as today.
 
 ### 3.3 Operator
 
@@ -117,7 +131,9 @@ The hive template ships the operator entry, so a fresh hive can seat a master wi
   role: operator
 ```
 
-and `templates/_swarm/profiles/default.yaml` sets `operators: [op]`. `allow_self_promote` stays `false`.
+`templates/_swarm/profiles/default.yaml` sets `operators: [op]`. `allow_self_promote` stays `false`.
+
+**Hives that predate this template.** `join --role master` refuses before creating anything unless `op` is in the registry and in `operators`. The message is the two-line operator edit to publish (the README step), naming both files. `join --role worker` does not need `op`.
 
 ---
 
@@ -127,19 +143,22 @@ and `templates/_swarm/profiles/default.yaml` sets `operators: [op]`. `allow_self
 rip-swarm join --role worker|master --harness H [--project DIR]
 ```
 
-Run from anywhere inside the project work tree (`--project` defaults to the current directory). All paths it prints are absolute.
+Run it from anywhere inside the project work tree; `--project` defaults to the current directory. All paths it prints are absolute.
 
 ### 4.1 Steps
 
-1. **Project.** `git rev-parse --show-toplevel` and `--git-common-dir` from `--project`. Refuse if not inside a git work tree. `MAIN` is the main worktree root (parent of the common dir for a non-bare repo).
-2. **Hive clone.** Clone `origin/swarm` single-branch into `<common-dir>/rip-swarm/pending-<ulid>`. If `origin/swarm` does not exist, bootstrap it first with the existing `init_hive` logic (temp dir, template, push). That push is the only one to the project remote, and only on the first join ever. Set the clone's `user.name`/`user.email` from the project's effective git config.
-3. **Master pre-check** (role master only). Sync; if `claims/orchestrator.json` is held by a live baton, refuse with exit 2 naming the holder and remove the pending clone. No member file is created.
-4. **Member.** Allocate the id (§3.2), create and publish `agents/<id>/member.json`. Rename the clone to `<common-dir>/rip-swarm/hive-<id>`.
-5. **Role setup.**
-   - *worker:* create or reuse the worktree `MAIN/.worktrees/<id>` on branch `swarm/<id>`, based on `swarm/integration` if that branch exists, else on `MAIN`'s `HEAD`.
-   - *master:* `promote --agent <id> --by op --reason "joined as master"`. On `ClaimDenied` (another master won the race), tombstone the fresh member (as `leave` does) and exit 2. Create or reuse `MAIN/.worktrees/integration` on branch `swarm/integration` (created from `MAIN`'s `HEAD` if missing).
-6. **Exclude.** Ensure `.worktrees/` is listed in `<common-dir>/info/exclude`. No tracked file in the project is touched.
-7. **Print** one `KEY=value` per line:
+1. **Project.** From `--project`, run `git rev-parse --show-toplevel` and `--git-common-dir`, and refuse if not inside a git work tree. `MAIN` is the main worktree root (the parent of the common dir for a non-bare repo). Read the `origin` URL, and refuse if `origin` is missing. Refuse if `refs/heads/rip-swarm` exists (Names, §1).
+2. **Identity for hive commits.** Use the project's effective `user.name` / `user.email`. If either is unset, fall back to the same values `init_hive._bootstrap` uses (`rip-swarm` / `rip-swarm@localhost`). Every hive commit this agent makes, bootstrap or not, uses this identity. It is set on the agent's clone.
+3. **Bootstrap if needed.** If `origin/swarm` does not exist, create it with the temp-dir bootstrap only (template → temp repo → push to `origin swarm`). If that push is rejected because `swarm` now exists (another session bootstrapped first), continue: that is an attach. `join` never calls `init_hive`'s clone or `.gitignore` steps and never creates `./_swarm`. Bootstrap is the only step that **creates** the branch. Every later member, claim, message and heartbeat publish pushes to that same `origin/swarm`, exactly as the v0.2 publish loop does.
+4. **Hive clone.** Clone `origin/swarm` single-branch into `<common-dir>/rip-swarm/pending-<ulid>`, and set the identity from step 2.
+5. **Preflight** (master only). If `op` is missing from the registry or from `operators`, exit 1 with the migration message (§3.3). If `claims/orchestrator.json` holds a live baton, exit 2 naming the holder and `expires_at`. In both cases remove the pending clone; no member file exists yet.
+6. **Member.** Allocate the id (§3.2), then create and publish `agents/<id>/member.json`. Rename the clone to `<common-dir>/rip-swarm/hive-<id>`.
+7. **Role setup.** If anything in this step fails, **undo the member**: tombstone it and publish, as `leave` does, then remove the hive clone. Only then report.
+   - *worker:* create or reuse `MAIN/.worktrees/<id>` on branch `rip-swarm/<id>`, based on `rip-swarm/integration` if that exists, else on `MAIN`'s `HEAD`.
+   - *master:* `promote --agent <id> --by op --reason "joined as master"`. A `ClaimDenied` here means another master's baton reached the remote first: undo the member and exit 2, naming the holder read from the remote tip. Any other failure: undo the member and exit 1 with the error. Then create or reuse `MAIN/.worktrees/integration` on `rip-swarm/integration`, created from `MAIN`'s `HEAD` if missing.
+8. **Exclude.** Ensure `.worktrees/` is listed in `<common-dir>/info/exclude`. No tracked file in the project is touched.
+9. **Seed local state** (§7.3) so this session reacts only to events after it joined.
+10. **Print** one `KEY=value` per line, then any `NOTE=` lines:
 
 ```
 VERSION=0.3.0
@@ -148,24 +167,29 @@ ROLE=worker
 HARNESS=claude-code
 HIVE=/…/project/.git/rip-swarm/hive-claude-2
 WORKTREE=/…/project/.worktrees/claude-2
-BRANCH=swarm/claude-2
-INTEGRATION=swarm/integration
+BRANCH=rip-swarm/claude-2
+INTEGRATION=rip-swarm/integration
+NOTE=based on HEAD (no rip-swarm/integration yet); uncommitted changes in MAIN are not included
 ```
+
+A `NOTE=` line appears whenever a branch is based on `HEAD`. It says that uncommitted work in `MAIN` is not on the new branch, and it also appears if `MAIN` is dirty.
 
 ### 4.2 Why the hive clone lives in the common dir
 
-It sits outside every work tree, so there is no `.gitignore` edit and no chance a worktree commit picks it up. One clone per agent removes the shared-`_swarm/` lock and dirty-tree collisions found while preparing trial 1. `resolve_hive` is unchanged; role skills always pass `--hive "$HIVE"`. The `./_swarm` layout keeps working for manual use.
+The clone sits outside every work tree, so there is no `.gitignore` edit and no chance that a worktree commit picks it up. One clone per agent removes the shared-`_swarm/` lock and dirty-tree collisions found while preparing trial 1. `resolve_hive` is unchanged, and role skills always pass `--hive "$HIVE"`. The `./_swarm` layout keeps working for manual use.
 
-### 4.3 Errors
+### 4.3 Exit codes
 
 | Condition | Result |
 |-----------|--------|
 | Not in a git work tree | exit 1, "run from inside the project" |
 | No `origin` remote | exit 1, names the missing remote |
-| Live baton held (master) | exit 2, names holder and `expires_at` |
+| `refs/heads/rip-swarm` exists | exit 1, names the branch to rename or delete |
+| `op` missing from registry or `operators` (master) | exit 1, migration message (§3.3) |
+| Live baton held, or baton race lost (master) | **exit 2** (the only exit 2), names holder and `expires_at` |
 | Id race lost 5 times | exit 1, "retry join" |
 | Worktree path exists but is not a worktree of this repo | exit 1, names the path; never deletes it |
-| Base branch missing | falls back to `MAIN`'s `HEAD`, and says so |
+| Any failure after the member was published | member tombstoned, clone removed, then exit 1 |
 
 ---
 
@@ -175,12 +199,16 @@ It sits outside every work tree, so there is no `.gitignore` edit and no chance 
 rip-swarm leave --hive HIVE --agent ID
 ```
 
-1. Release every active claim held by `ID` (`release --note "left the swarm"`). If `ID` holds the baton, release it too.
-2. Tombstone `agents/<ID>/member.json` → `member.left.<stamp>.json` and publish.
-3. Remove the worktree `MAIN/.worktrees/<ID>` only if it is clean **and** `swarm/<ID>` is fully merged into `swarm/integration`. Otherwise keep it and print why. The branch is never deleted.
-4. Remove the agent's hive clone.
+1. If the member is already tombstoned, or `HIVE` no longer exists, print `already left` and exit 0. Never re-clone.
+2. Release every active work claim held by `ID` (`release --note "left the swarm"`). If `ID` holds the baton, release it too (`release --task orchestrator`).
+3. Tombstone `agents/<ID>/member.json` → `member.left.<YYYYMMDDTHHMMSSZ>.json` and publish.
+4. Worktree:
+   - **Worker:** remove `MAIN/.worktrees/<ID>` only if it is clean **and** `rip-swarm/<ID>` is fully merged into `rip-swarm/integration`. Otherwise keep it and print why.
+   - **Baton holder / master:** never touches `MAIN/.worktrees/integration` or `rip-swarm/integration`.
+   - Branches are never deleted.
+5. Remove the agent's hive clone.
 
-Print a one-line summary per action. Idempotent: leaving twice is a no-op with exit 0.
+Prints a one-line summary per action.
 
 ---
 
@@ -190,8 +218,8 @@ Print a one-line summary per action. Idempotent: leaving twice is a no-op with e
 rip-swarm messages --hive HIVE --to ID --new
 ```
 
-- Prints only messages addressed to `ID` (same addressing as `messages --to`) that are newer than the agent's cursor, then advances the cursor to the last printed message.
-- The cursor is `(ts, id)`, compared lexicographically, stored in the local state file (§7.3). It is never committed.
+- Prints only messages addressed to `ID` (the same addressing as `messages --to`) that are newer than the agent's cursor, then advances the cursor to the last printed message.
+- The cursor is `(ts, id)`, compared lexicographically and stored in the local state file (§7.3). It is never committed.
 - `--new` requires `--to`. Without `--new`, `messages` behaves as today.
 
 ---
@@ -199,48 +227,77 @@ rip-swarm messages --hive HIVE --to ID --new
 ## 7. `wait` helper
 
 ```
-rip-swarm wait --hive HIVE --agent ID [--timeout 540] [--interval 30]
+rip-swarm wait --hive HIVE --agent ID [--timeout 1800] [--interval 30]
 ```
 
-Blocks, syncing every `--interval` seconds, and returns (exit 0) as soon as there is something for `ID` to do. It prints one line: `wake <reason> [detail]`. `--timeout` stays under the 10-minute foreground limit of both harnesses; the role skill simply calls `wait` again.
+`wait` blocks, syncing every `--interval` seconds, and exits 0 as soon as there is something for `ID` to do, printing one line: `wake <reason> [detail]`. `--timeout` is the agent's idle window. It is a wake reason that `wait` prints itself, and it is unrelated to any harness's tool timeout.
 
-### 7.1 Wake reasons
+### 7.1 How a harness runs `wait` (both harnesses)
 
-Role comes from the board: `ID` is master if it holds the live baton, else worker. Reasons are checked in this order each tick:
+`wait` always runs as a **background command**, and its completion notification is the wake. Both harnesses cap foreground commands well below useful idle windows. Grok's `toolset.bash.timeout_secs` defaults to 120s; Claude Code's Bash defaults to 120s with a 600s ceiling and moves a timed-out command to the background. So a foreground `wait` returns a task id instead of a wake line.
+
+| Harness | Start | Wake |
+|---------|-------|------|
+| Claude Code | Bash with `run_in_background: true` | the completion re-invokes the session; read the task output |
+| Grok Build | `run_terminal_command` with `background: true` | the completion notification; read it with `get_command_or_subagent_output` |
+| Other | the harness's background mechanism; if none, foreground with `--timeout` below its limit | the command's output |
+
+Rules the role skills state:
+
+- After starting `wait`, end the turn. Do not poll it, and do not start other work that would need the hive.
+- Only a line starting with `wake ` is a wake. A harness timeout, a backgrounding notice, or a task id is not a wake, and never counts as `timeout`.
+- **One `wait` per agent.** `wait` takes a lock file in the agent's state directory (`<HIVE>/.git/rip-swarm-wait.lock`, holding its pid). A second `wait` for the same agent while the lock's pid is alive exits 1 with `wait already running (pid N)`, and the skill then just ends its turn. A stale lock (dead pid) is replaced.
+- An exit other than 0 is a failure (§7.6), not a wake.
+
+### 7.2 Wake reasons
+
+The role comes from the board: `ID` is master if it holds the live baton, else worker. Reasons are checked in this order each tick:
 
 | Reason | Who | When |
 |--------|-----|------|
-| `lease-lost` | both | `ID` held a claim or baton at the previous tick and no longer does (expired and stolen, or released elsewhere). Detail: task id. |
-| `message` | both | An unread message addressed to `ID` (cursor, §6). Does **not** advance the cursor; `messages --new` does. |
-| `task-available` | worker | `ID` holds no work claim and an open task exists that `ID` has not seen open before (§7.2). Detail: task ids. |
-| `task-finished` | master | A task gained a `complete`, `release`, `reject` or `expired` tombstone not seen before. Detail: task id and action. |
-| `all-complete` | master | Every inbox task has a `complete` tombstone or a `reject` tombstone, none is claimed, and at least one task exists. |
-| `idle-board` | master | An open task has had no claim for `idle_board_after` (profile, default `10m`) since it was created or last returned to the board. Reported once per task per return. |
+| `lease-lost` | both | `ID` held a claim or the baton at the previous tick and no longer does (expired and stolen, or released elsewhere). Detail: task id. |
+| `message` | both | An unread message addressed to `ID` (cursor, §6). This does **not** advance the cursor; `messages --new` does. |
+| `task-available` | worker | `ID` holds no work claim and an open task exists that `ID` has not seen open before (§7.3). Detail: task ids. |
+| `task-finished` | master | A task gained a `complete`, `release`, `reject` or `expired` tombstone not seen before, **or** a task's claim has expired and not yet been stolen (seen once per expiry). Detail: task id and action. |
+| `all-complete` | master | At least one task exists, and every inbox task has a `complete` or `reject` tombstone, none is claimed, and none is blocked (§7.4). |
+| `idle-board` | master | An open task has had no claim for `idle_board_after` (profile, default `10m`) since it was created, last returned to the board, or last unblocked. Reported once per task per return. |
 | `timeout` | both | Nothing above within `--timeout`. |
 
-### 7.2 Seen-open set
+### 7.3 Open tasks, generations, seen sets
 
-A task is *open* when it has an inbox file, no active claim, and no `complete` or `reject` tombstone. Its *generation* is the number of `release` and `expired` tombstones it has. `wait` reports `task-available` only for `(task_id, generation)` pairs not in the agent's seen set, then adds them. So a worker that passes on a task (D6) is not woken for it again, but a task that comes back to the board after a release or expiry wakes everyone once more. Rejected tasks are never open for workers; the master sees them through `task-finished`.
+- A task is **open** when it has an inbox file, no `complete` or `reject` tombstone, is not blocked (§7.4), and either has no claim file or its claim file is **expired** (`fold.Expired`). An expired claim is open: the worker's ordinary `claim` takes the existing steal path, so a dead worker's task goes back into circulation without anyone nudging.
+- Its **generation** is the number of its `release` and `expired` tombstones, plus 1 if its claim file is currently expired and unstolen.
+- `wait` reports `task-available` only for `(task_id, generation)` pairs not in the agent's seen set, then adds them. A worker that passes on a task (D6) is not woken for it again. A task that comes back after someone else's release or an expiry wakes every worker once more.
+- **Own release.** When `release` is run by the agent that owns the local state, it adds the resulting `(task_id, generation+1)` to that agent's seen set. That agent is not re-offered a task it just gave up (for example `cannot merge integration`), while every other worker is. It is offered again only by a new generation from someone else's release or expiry, or through a message.
+- Rejected tasks are never open for workers; the master sees them through `task-finished`.
 
-### 7.3 Local state
+### 7.4 Dependencies (`after`)
 
-`<HIVE>/.git/rip-swarm-state.json` (inside the agent's own hive clone, never committed):
+- Inbox tasks gain an optional `after: [task_id, …]` field: `inbox-add --after ID` (repeatable). The field is validated against existing inbox files at creation, and the inbox schema gains it.
+- A task is **blocked** while any task in its `after` list lacks a `complete` tombstone. Blocked tasks are not open. `claim` refuses them with exit 2 (`blocked by <ids>`). `all-complete` is false while any task is blocked.
+- A blocked task whose dependency was rejected stays blocked. The master sees the `reject` through `task-finished` and decides: reject the dependent too, or post a replacement.
+- `status` lists blocked tasks under `blocked`, with the ids they wait on.
+
+This keeps the whole plan in the hive. A master that restarts, compacts, or takes over an expired baton reads the plan from the board instead of from a conversation.
+
+### 7.5 Local state
+
+`<HIVE>/.git/rip-swarm-state.json` sits inside the agent's own hive clone and is never committed:
 
 ```json
 {"agent": "claude-2", "messages_cursor": ["2026-09-26T10:00:00Z", "msg_…"],
  "seen_open": ["task_…#0"], "seen_tombstones": ["task_….complete.….json"],
- "held": ["task_…"]}
+ "seen_expiries": ["task_…#1"], "held": ["task_…"]}
 ```
 
-Written atomically. If it is missing or unreadable, it starts empty; the only cost is a repeated wake.
+- **Seeded at join** (§4.1 step 9): `messages_cursor` is set to the newest message already present, `seen_tombstones` to every tombstone already present, `seen_open` and `seen_expiries` to every task already open or expired, and `held` to nothing. A session reacts only to events from after it joined. A second goal on the same hive does not replay the first goal's completions into the new master's merge step.
+- Written atomically. If the file is later missing or unreadable, `wait` re-seeds it the same way and prints `NOTE state re-seeded` on stderr. It never replays history.
 
-### 7.4 Heartbeat while waiting
+### 7.6 Heartbeat and failure
 
-On each tick, if `ID` holds a work claim or the baton whose remaining lease is at most half the lease, `wait` heartbeats it (publishing as `heartbeat` does). An agent that is alive and waiting never loses its lease. An agent that is working heartbeats itself before long steps.
-
-### 7.5 Failure
-
-A dirty or diverged hive, or a publish error, exits 1 with the existing hint. The role skill reports it to the operator and stops its loop; it does not repair history.
+- On each tick, if `ID` holds a work claim or the baton with at most half its lease remaining, `wait` heartbeats it, publishing as `heartbeat` does. An agent that is alive and waiting never loses its lease.
+- An agent that is **working** (not waiting) heartbeats itself before each long step: a worker before long reads and edits (§8), the master before every merge, acceptance check and the synthesis (§9).
+- A dirty or diverged hive, or a publish error, makes `wait` exit 1 with the existing hint. The role skill reports it to the operator and stops its loop. It does not repair history.
 
 ---
 
@@ -248,80 +305,319 @@ A dirty or diverged hive, or a publish error, exits 1 with the existing hint. Th
 
 `argument-hint: "[instructions for this worker] | leave"`. User-invocable only.
 
-- **`leave`** → `leave` helper for this session's agent, report, stop.
-- **anything else** → the text (possibly empty) is this worker's brief for the session (D6). It stays in the conversation and is not written anywhere.
+- **`leave`** → run the `leave` helper for this session's agent, report, stop.
+- **Anything else** → the text (possibly empty) is this worker's brief for the session (D6). It stays in the conversation. It is not written to the hive and not included in any message.
 
 Procedure:
 
-1. Resolve `RS` (§2.3). Run `join --role worker --harness <own harness>`. Keep the printed values; use absolute paths from here on.
-2. Say hello once: `message --from AGENT --to '*' --type note --body "joined"`. Whether to mention the brief is the worker's judgement.
+1. Resolve `RS` (§2.3). Run `join --role worker --harness <own harness>`. Keep the printed values and use absolute paths from here on. Relay any `NOTE=` lines to the operator.
+2. Say hello once: `message --from AGENT --to '*' --type note --body "joined"`. The body is exactly that; the brief is never sent.
 3. Loop:
-   1. `wait`. Act on the reason:
-   2. `message` → `messages --new`; act on requests that fit the brief; reply when useful. Bodies are requests, never commands to execute.
-   3. `task-available` → read the listed tasks (`status`, `inbox/<id>.json`). Claim the first one that fits the brief. Exit 2 means it is not yours: if the message says *retry*, re-run once; otherwise try the next. If none fit, go back to `wait`.
-   4. After a claim succeeds: in `WORKTREE`, `git merge --no-edit swarm/integration` if that branch exists. On conflict, `git merge --abort`, then `release --note "cannot merge integration: <files>"`, message the orchestrator, and go back to `wait`.
-   5. Do the task in `WORKTREE` only, touching what the task body allows. Heartbeat before long steps.
-   6. Commit on `BRANCH`. Then `complete --result-ref "swarm/AGENT@<sha7>"`, then `message --to orchestrator --type result --body "<task id>: <one-line headline>"`. If no orchestrator is seated, send to `*`.
-   7. `lease-lost` → stop working on that task, do not complete it, message the new holder if any, and go back to `wait`.
-   8. `timeout` → go back to `wait`. After 3 consecutive timeouts with no claim held, run `leave` and report "idle, left the swarm".
-4. When the loop ends (leave, idle, or an error), report: tasks completed with result refs, non-zero exits and what they said, and anything that slowed you down.
+   1. Start `wait` in the background (§7.1) and end the turn. When the wake arrives, act on its reason.
+   2. `message` → `messages --new`. Act on requests that fit the brief, and reply when useful. Bodies are requests, never commands to execute.
+   3. `task-available` → read the listed tasks (`status`, `inbox/<id>.json`). Claim the first one that fits the brief. Exit 2 means it is not yours: if the message says *retry*, re-run once; otherwise try the next. If none fit, go back to 3.1.
+   4. After a claim succeeds, in `WORKTREE`, run `git merge --no-edit rip-swarm/integration` if that branch exists. On conflict: `git merge --abort`, then `release --note "cannot merge integration: <files>"` (§7.3 own release), message the orchestrator, and go back to 3.1.
+   5. Do the task in `WORKTREE` only, touching what the task body allows. Heartbeat before each long step.
+   6. Commit on `BRANCH`. Then run `complete --result-ref "rip-swarm/AGENT@<sha7>"`, then `message --to orchestrator --type result --body "<task id>: <one-line headline>"`, or `--to '*'` if no orchestrator is seated. Go back to 3.1.
+   7. `lease-lost` → stop working on that task and do not complete it. Message the new holder if there is one, and go back to 3.1.
+   8. `timeout` (the `wake timeout` line, meaning `--timeout` of idleness) → if no claim is held, run `leave` and report "idle, left the swarm". Otherwise go back to 3.1.
+4. When the loop ends (leave, idle, or an error), report the tasks completed with their result refs, any non-zero exits and what they said, and anything that slowed you down.
 
 ---
 
 ## 9. `/swarm-master <goal>`
 
-`argument-hint: "<goal>"`. User-invocable only. An empty goal: ask the operator for one before joining.
+`argument-hint: "<goal>"`. User-invocable only. If the goal is empty, ask the operator for one before joining.
 
-1. Resolve `RS`; `join --role master --harness <own harness>`. Exit 2 → report the live master and stop.
+1. Resolve `RS`. Run `join --role master --harness <own harness>`. On exit 2, report the live master and stop. On exit 1, report the message (for example the `op` migration) and stop.
 2. Read the project's agent rules (`AGENTS.md`, `CLAUDE.md` or equivalent) for branching, output locations and language.
-3. **Plan.** Split the goal into 3–8 tasks that can run in parallel. Each task body states what to produce, which files or directories it may touch, and the acceptance check. Sequencing is the master's job: post only tasks that can start now; hold dependent tasks and post them when their inputs are complete.
-4. Post each with `inbox-add --created-by AGENT`. Broadcast the goal once: `message --to '*' --type note --body "goal: <goal>"`.
-5. Loop on `wait`:
-   - `task-finished complete` → read the result ref (`swarm/<id>@<sha>`). In `.worktrees/integration`, `git merge --no-ff <sha>`.
-     - Conflict: `git merge --abort`; post a task "Rebase <title> onto swarm/integration" naming the sha; message the worker.
-     - Merged: check the result against the task's acceptance check. If it falls short, post a follow-up task describing the gap. Do not fix it yourself (D2).
-     - Post any held tasks whose inputs are now complete.
-   - `task-finished release|expired` → nothing required (the task is back on the board); read the note and adjust if it points at a problem in the task.
-   - `task-finished reject` → read the note; rewrite as a new task or drop it, and record which in the synthesis.
-   - `message` → `messages --new`; answer workers' questions.
+3. **Plan.** Split the goal into tasks. Aim for units a worker can finish in one sitting, usually a handful; the count is a judgement and no helper checks it. Each task body states what to produce, which files or directories it may touch, and the acceptance check. Express order with `--after`: post the **whole** plan now, with dependent tasks naming what they wait on (§7.4).
+4. Post each task with `inbox-add --created-by AGENT [--after …]`. Broadcast the goal once: `message --to '*' --type note --body "goal: <goal>"`.
+5. Loop. Start `wait` in the background (§7.1) and end the turn; on each wake:
+   - `task-finished complete` → heartbeat the baton. Read the result ref (`rip-swarm/<id>@<sha>`). In `MAIN/.worktrees/integration`, run `git merge --no-ff <sha>`.
+     - Conflict: `git merge --abort`. Post a task "Rebase <title> onto rip-swarm/integration" naming the sha, and message the worker.
+     - Merged: heartbeat, then check the result against the task's acceptance check. If it falls short, post a follow-up task describing the gap (with `--after` if later tasks depend on it). Do not fix it yourself (D2).
+   - `task-finished release|expired` → nothing required, since the task is back on the board. Read the note and adjust if it points at a problem in the task.
+   - `task-finished reject` → read the note. Rewrite it as a new task or drop it, and reject or re-point any task blocked on it. Record which in the synthesis.
+   - `message` → `messages --new`. Answer workers' questions.
    - `idle-board` → tell the operator which tasks nobody is claiming (possibly because of worker briefs), and keep waiting.
-   - `lease-lost` → the baton is gone: stop, report to the operator.
+   - `lease-lost` → the baton is gone. Stop and report to the operator. The plan stays on the board for the next master.
+   - `timeout` → start `wait` again. The master never leaves on idleness.
    - `all-complete` → go to step 6.
-6. **Finish.** Write the synthesis on `swarm/integration`, following the project's rules for where notes go (default `docs/swarm/<date>-<goal-slug>.md`): the goal, each task's outcome with its merge commit, rejects and follow-ups, and open questions. Commit it. Release the baton (`release --task orchestrator`). Do not push. Report to the operator: the branch, what it contains, and how to review it (`git log MAIN_HEAD..swarm/integration`).
+6. **Finish.** Heartbeat the baton. Write the synthesis on `rip-swarm/integration`, following the project's rules for where notes go (default `docs/swarm/<date>-<goal-slug>.md`). It covers the goal, each task's outcome with its merge commit, rejects and follow-ups, and open questions. Commit it. Then run `leave`: this releases the baton, tombstones the master member and removes its hive clone, but keeps `MAIN/.worktrees/integration` and the branch. Do not push. Report to the operator: the branch, what it contains, and how to review it (`git log <base>..rip-swarm/integration`).
+
+**Taking over.** A master that joins while tasks from an earlier master are still open or blocked continues that plan from the board. It does not re-post it.
 
 ---
 
 ## 10. Other changes
 
-- **Profile template:** `worker_lease_ttl: 30m` (was `15m`); new `idle_board_after: 10m`; `operators: [op]`.
-- **`status`:** new `members` section listing active members with harness, joined_at and last activity. Last activity is the newest `ts` among the member's messages and claim audit lines. Left members are listed under `left_members`. `unknown_agents` uses `known_agents` (§3.1).
-- **Allowlists:** `join` publishes only `agents/<id>/member.json`; `leave` only `agents/<id>/member.json` and `agents/<id>/member.left.*.json` (plus the release paths it already allows).
-- **Spec v0.2 §13 changelog** gets a row pointing here; PROTOCOL template "Roles" gains the member-file rule and the role commands.
-- **README / trial runbook:** install via §2.2; the adgency trial becomes `/swarm-master <goal>` in one session and `/swarm-worker` (optionally with a brief) in the others. The manual registry and profile steps are removed.
+- **Profile template:** `worker_lease_ttl: 30m` (was `15m`), new `idle_board_after: 10m`, and `operators: [op]`.
+- **Inbox:** optional `after` field, `inbox-add --after`, and `claim` refuses blocked tasks (§7.4). The schema is updated.
+- **`status`:**
+  - New `members` section listing active members with harness, `joined_at` and last activity. Last activity is the newest `ts` among the member's messages and claim audit lines.
+  - Left members are listed under `left_members`.
+  - A `blocked` section (§7.4).
+  - `unknown_agents` uses `known_agents` (§3.1).
+- **Allowlists:** `join` publishes only `agents/<id>/member.json`. `leave` publishes only `agents/<id>/member.json` and `agents/<id>/member.left.*.json`, plus the release paths it already allows.
+- **Spec v0.2 §13 changelog** gets a row pointing here. The PROTOCOL template "Roles" section gains the member-file rule, the `after` rule and the role commands.
+- **README and trial runbook:** install via §2.2. The adgency trial becomes `/swarm-master <goal>` in one session and `/swarm-worker` (optionally with a brief) in the others. The manual registry and profile steps are removed.
 
 ---
 
 ## 11. Testing
 
-Test-first, stdlib `unittest`, with real git against temporary bare remotes as in `tests/test_gitops.py`:
+Tests are written test-first with stdlib `unittest`, using real git against temporary bare remotes as in `tests/test_gitops.py`:
 
-- **Member / registry:** a member file registers an agent; a left tombstone unregisters it; `known_agents` keeps it; an id race between two clones yields `claude-1` and `claude-2`; ids are never reused after leave.
-- **join:** fresh project bootstraps `origin/swarm` and seats `op`; worker gets a worktree based on integration, or on `HEAD` when there is none; master refused while a live baton exists; master promote race loses cleanly (member tombstoned); rejoin gets a new id; `.worktrees/` lands in `info/exclude`; no tracked project file changes.
-- **leave:** releases claims and the baton; keeps a dirty or unmerged worktree; idempotent.
-- **messages --new:** cursor advances; nothing repeats; addressing matches `--to`.
-- **wait:** each wake reason, using a small `--interval` and an injected clock for leases; heartbeat while waiting; the seen-open set suppresses repeats and re-wakes on a new generation; `timeout`.
-- **Rehearsal (model-free):** one test drives master + two workers purely through the helpers against one bare remote: goal split into three tasks, a claim race, a completion merged into integration, one conflict re-queued, `all-complete`, baton released.
-- **Packaging:** a test that `skills/*/SKILL.md` frontmatter parses, role skills carry `disable-model-invocation: true`, and `scripts/*.py` run from a copy of `skills/rip-swarm/` outside the repo.
+- **Member / registry:**
+  - A member file registers an agent. A left tombstone unregisters it, and `known_agents` keeps it.
+  - An id race between two clones yields `claude-1` and `claude-2` (`MemberTaken` path). Ids are never reused after leave.
+  - `claude-10` follows `claude-9` (integer maximum).
+  - A hand-registered `claude-3` in `registry.yaml` is skipped.
+  - An unusual harness string maps to a valid prefix.
+- **join:**
+  - A fresh project bootstraps `origin/swarm` and seats `op`, with no `.gitignore` change and no `./_swarm`.
+  - Two concurrent first joins: one bootstraps and the other attaches.
+  - A machine without `user.email` still publishes the member.
+  - A worker's worktree is based on integration, or on `HEAD` with a `NOTE=` when there is none.
+  - A master is refused while a live baton exists (exit 2).
+  - A master on a pre-template hive gets exit 1 with the migration message and leaves no member behind.
+  - A master that loses the promote race gets exit 2 with the member tombstoned.
+  - A forced failure after the member publish leaves the member tombstoned and the clone gone.
+  - A local `rip-swarm` branch is refused.
+  - A rejoin gets a new id.
+  - `.worktrees/` lands in `info/exclude`, and no tracked project file changes.
+  - Local state is seeded, so there is no replay of existing tombstones or messages.
+- **leave:**
+  - Releases claims and the baton.
+  - Keeps a dirty or unmerged worker worktree.
+  - Never removes the integration worktree.
+  - Idempotent after the clone is gone.
+- **messages --new:** the cursor advances, nothing repeats, and addressing matches `--to`.
+- **wait:**
+  - Each wake reason, using a small `--interval` and an injected clock for leases.
+  - An expired, unstolen claim wakes `task-available` (worker) and `task-finished expired` (master).
+  - Heartbeat while waiting.
+  - The seen-open set suppresses repeats and re-wakes on a new generation.
+  - An own release is not re-offered to the releaser but is offered to others.
+  - A blocked task is not open until its `after` tasks complete, and `all-complete` is false while it is blocked.
+  - A second `wait` for the same agent exits 1 while the first runs, and a stale lock is replaced.
+  - `timeout`.
+- **Inbox `after`:** unknown ids are refused at creation. `claim` on a blocked task exits 2.
+- **Rehearsal (model-free).** One test drives a master and two workers purely through the helpers against one bare remote. It covers:
+  - A goal posted as three tasks with one `after`, and a claim race.
+  - A completion merged into integration.
+  - A worker's `cannot merge integration` release not re-offered to it.
+  - A crashed worker's expired claim stolen by the other.
+  - A conflict re-queued, then `all-complete` and the master leaving.
+- **Packaging:**
+  - `skills/*/SKILL.md` frontmatter parses, and no root `SKILL.md` exists.
+  - Role skills carry `disable-model-invocation: true`, and their text contains the background-`wait` procedure for both harnesses (§7.1).
+  - `scripts/*.py` run from a copy of `skills/rip-swarm/` outside the repo.
+  - `tests/test_cli.py` paths follow the move.
 
-Manual acceptance: install with §2.2, confirm `/swarm-master` and `/swarm-worker` appear in both harnesses, then run the adgency trial.
+Manual acceptance: install with §2.2, confirm `/swarm-master` and `/swarm-worker` appear in both harnesses, confirm a backgrounded `wait` wakes each harness, then run the adgency trial.
 
 ---
 
 ## 12. Out of scope
 
 - Cross-machine swarms (pushing worker branches, remote integration).
-- Automatic eviction of crashed members.
+- Automatic eviction of crashed members. Their claims still expire and are re-offered (§7.3).
 - Recording worker specialisation or routing tasks by skill (D6).
-- More than one active goal per hive; concurrent masters.
-- Pushing `swarm/integration` or opening a PR.
+- More than one active goal per hive, and concurrent masters.
+- Pushing `rip-swarm/integration` or opening a PR.
 - An external supervisor that launches harness sessions.
+
+---
+
+## 13. Review (2026-09-26)
+
+**Verdict:** needs revision (1 critical, 9 major, 6 minor, 3 nit).
+**Reviewed against:** this document; `docs/specs/2026-09-17-design-spec.md` (v0.2); the helpers on `master` (`init_hive`, `gitops.publish`, `registry.load_registry`, `fold.active_holder`, `claim.try_claim`); the trial runbook `docs/plans/2026-09-25-first-trial.md`; Grok Build's bash tool contract and `~/.grok/docs/user-guide/05-configuration.md`; Claude Code's bash timeout (default 120s, ceiling 600s, timeout moves the command to the background).
+**D1–D7 are not reopened.** The findings are places where the mechanism, as written, does not carry those decisions out.
+
+### What holds
+
+- One hive clone per agent, outside every work tree, is the right fix for the shared-`_swarm/` lock the trial runbook already hit. `resolve_hive` staying as it is, with the role skill passing `--hive`, keeps manual use working.
+- Create-only `member.json`, first push wins, tombstone on leave, and "master is whoever holds the baton" match pillar C and §4 of the v0.2 spec. Putting `role: worker` on every member file is the right call: `registry.role` does not grant promote.
+- Wake-reason order (task-finished before all-complete) means a follow-up posted while handling the last completion is visible on the next tick.
+- `promote_allow` already includes the `by` agent's outbox, so `promote --agent <id> --by op` can publish once `op` is registered and listed in `operators`.
+- The install layout matches the skills CLI: a root `SKILL.md` shadows `skills/<name>/SKILL.md`, so the move is required. `-a grok` is the CLI's Grok Build id. `disable-model-invocation` and `argument-hint` are real Grok frontmatter (`08-skills.md`).
+
+### Critical
+
+#### C1. `wait` does not return in the foreground on either harness
+
+§7 sets `--timeout 540` so the call "stays under the 10-minute foreground limit" and the skill calls `wait` again. Both harnesses return earlier than that, and the return is not the wake line.
+
+- Grok Build's bash tool backgrounds a foreground command after about 15 seconds and hands back a task id. The documented default (`toolset.bash.timeout_secs`) is 120 seconds. Completion arrives later, as a notification. Passing a longer timeout does not keep the tool call blocked.
+- Claude Code's bash default is 120 seconds; the model can request up to 600 seconds. On timeout the result is `Command did not complete within its 120s timeout and was moved to the background`, plus a task id. The wake line is in that background task's output, not in the tool result the skill is told to act on.
+
+§7.5 then makes this fatal: a non-zero or unexpected return stops the loop. A backgrounded `wait` looks like that return. The model either stops the role or starts a second `wait` beside the one already running. The "no nudging" success case depends on this loop.
+
+**Fix.** Spell the wait procedure per harness. Start one `wait` in the background (Claude: `run_in_background` or an explicit `timeout` at the ceiling; Grok: the tool will background it itself). The completion notification is the wake: read that output, act, then start the next `wait`. A second `wait` must not be started while one is still running. A harness timeout is not a `timeout` wake and must not count toward the idle leave. Keep `timeout` as a line `wait` itself prints.
+
+### Major
+
+#### M1. An expired claim is invisible, so nobody steals it
+
+§7.2 defines *open* as an inbox file, no active claim, and no `complete` or `reject` tombstone. In the code an expired lease is still the claim file: `fold.active_holder` returns `Expired` while `claims/<task_id>.json` exists (`rip_swarm/fold.py`). The `expired` tombstone is written later, inside `try_claim`, when someone steals it (`rip_swarm/claim.py`).
+
+Until that steal, the task is not open, so `task-available` does not fire, and it has a claim, so `idle-board` does not fire. `task-finished` fires only once a tombstone exists. D2 forbids the master from claiming work. A worker that dies mid-task leaves the task stuck until a person nudges someone to claim it. That is the lease case the trial runbook is there to exercise.
+
+**Fix.** Treat `Expired` as open. `task-available` lists it; the worker's ordinary claim takes the existing steal path.
+
+#### M2. Dependent tasks exist only in the master's conversation
+
+§9 tells the master to hold dependent tasks and post them when their inputs are done. Those tasks are not in the hive. `all-complete` is defined on inbox files only (§7.1). After the posted wave is complete, `all-complete` fires and §9 step 6 writes the synthesis and releases the baton, while the rest of the goal is still in chat memory.
+
+A compaction, a crash, or a second master (the first baton expired) does not have that list. v0.2's first goal is that coordination is in the hive rather than in chat.
+
+**Fix.** Persist unposted tasks in the hive (inbox files with a blocked flag, or one create-only file under `agents/<id>/`). `all-complete` is true only when none of them are still blocked. A new master reads them instead of inheriting a conversation.
+
+#### M3. The member-id race is not the claim lost-race path
+
+§3.2 says a lost race on `member.json` retries through the claim publish loop, up to 5 times. `publish` turns a rebase conflict into `ClaimDenied` only when the conflict is `claims/<task_id>.json` (`gitops._rebase_conflicts_claim`). An add/add on `agents/claude-1/member.json` becomes `GitopsError: rebase onto upstream failed` after a reset. A `join` that retries only on `ClaimDenied` exits 1 on the first collision.
+
+Id allocation looks at member files only. `load_registry` raises `RegistryError` on a duplicate id (`registry.py`), and every trust gate calls it. The trial runbook registers `claude` and `grok` by hand; a later member id `claude-1` is safe, but a hand-registered `claude-1`, or `op` if a harness ever shortened to that, makes `require_agent` throw for every agent, not just the new one.
+
+**Fix.** Compute `n` across member files and `registry.yaml`. Teach the member publish to treat add/add on that exact `member.json` as a retryable race, and leave every other rebase failure as exit 1.
+
+#### M4. First join cannot call `init_hive` the way §4.1 describes
+
+`init_hive` resolves the project as the parent of `dest` and runs `git rev-parse --show-toplevel` there (`init_hive._project_root`). A dest under `<common-dir>/rip-swarm/` is inside `.git`. From there that command exits 128: `this operation must be run in a work tree` (reproduced). The same function appends `_swarm/` to the project's `.gitignore` and clones into `./_swarm`, which §4.1 step 6 and §4.2 forbid.
+
+§4.1 also says the bootstrap push is the only push to the project remote. Later member, claim, and message publishes push `origin/swarm`, which is that remote. Read as written, an implementer strips those pushes.
+
+Two sessions on a project with no `origin/swarm` both bootstrap. The loser's push is a non-fast-forward. Nothing in §4 says to attach instead.
+
+Bootstrap commits with a `rip-swarm@localhost` fallback. Later hive commits go through `_commit_op`, which uses whatever identity the clone has. A machine with no `user.email` can create the branch and then fail on the member publish.
+
+**Fix.** From `--project`, resolve the main work tree and `origin` URL first. Bootstrap with the temp-dir push only. If the push loses because `swarm` now exists, attach. Do not write `.gitignore` and do not create `./_swarm`. Say that bootstrap is the only step that creates the branch, and that later hive ops push that same branch. Use the same identity fallback as `_bootstrap` when the project has no effective `user.email`.
+
+#### M5. A failed master join leaves a live member, and exit 2 is not always "someone else is master"
+
+The live-baton pre-check happens before any member file (§4.1 step 3). The promote in step 5 runs after the member is published. Cleanup is specified only for `ClaimDenied`, and the text assumes that means another master won.
+
+`promote` calls `require_agent` first. A hive whose registry has no `op` raises `UnknownAgent` (a `RegistryError`), not `ClaimDenied`. Current `templates/_swarm/agents/registry.yaml` is `[]` and `operators` is `[]`. Every hive already created with that template hits this, the member stays active, and there is no baton. §9 tells the skill to report exit 2 as a live master, so a `ClaimDenied` of the form `op cannot promote claude-1` (op exists, `operators` does not list op) is reported as another master.
+
+**Fix.** Before creating a member, refuse unless `op` is in the registry and in `operators`, with a migration line for hives that predate the template change. After a member publish, any failure (including `GitopsError`) tombstones that member and removes the pending clone. Reserve exit 2 for a live baton, and name the holder.
+
+#### M6. A worker that cannot merge integration releases the task and is woken to claim it again
+
+§8 step 4: on conflict, `git merge --abort`, `release`, message the orchestrator, go back to `wait`. A release bumps the generation (§7.2). The seen-open set suppresses `(task, generation)` and re-wakes on the next one, so this worker is the first to be offered the task again, the brief still fits, and the merge fails again.
+
+**Fix.** A release this worker just performed for `cannot merge integration` stays skipped for this session until a message tells it to retry, or until the task body changes. The generation bump still wakes other workers.
+
+#### M7. A local branch named `swarm` makes the role branches uncreatable
+
+Worker branches are `swarm/<id>` and the integration branch is `swarm/integration` (§4.1). Git stores `refs/heads/swarm` as a file, so `refs/heads/swarm/integration` cannot be created beside it:
+
+```text
+fatal: cannot lock ref 'refs/heads/swarm/integration': 'refs/heads/swarm' exists
+```
+
+Reproduced. `refs/remotes/origin/swarm` does not collide. A local `swarm` is easy to acquire (`git switch swarm` once `origin/swarm` exists). The docs describe the hive as the `swarm` branch.
+
+**Fix.** In the project repo, before creating any `swarm/*` ref, refuse if `refs/heads/swarm` exists and say which branch to rename or delete. Pick the prefix in this spec so it cannot be that name.
+
+#### M8. The master does not heartbeat the baton while doing its job
+
+§7.4 heartbeats inside `wait`. §8 tells a worker to heartbeat before long steps. §9's merge, acceptance check, follow-up, and synthesis happen outside `wait` and never mention a heartbeat. `orchestrator_lease_ttl` stays `30m`. The trial runbook raised the worker lease to 60m because a review outlasts 15m; the same review is what the master does between waits.
+
+`lease-lost` then stops the master (§9). The integration worktree can be left mid-merge, and the baton is gone.
+
+**Fix.** Heartbeat the baton before merge, acceptance, and synthesis, same rule as the worker. Say so in §9.
+
+#### M9. An empty cursor replays the hive's history into the master's merge step
+
+§7.3: a missing state file starts empty, "the only cost is a repeated wake." For messages that is one wake (`messages --new` drains them). For tombstones the detail is one task, so each old tombstone is its own wake. §9 handles `task-finished complete` by merging the result sha and running the acceptance check.
+
+On a fresh hive there is nothing to replay. The second goal on the same hive (one active goal at a time still allows this) has a new master id and a new clone, so the seen set is empty. The master re-merges old shas and can post follow-up tasks for work that already landed, and it does this before it gets to the new goal's events whenever `message` and `task-finished` outrank them.
+
+**Fix.** At join, seed `messages_cursor` to the latest message, `seen_tombstones` to the tombstones already present, and `seen_open` to the tasks already open. A session reacts to events from after it joined. Say so in §7.3, in place of the "only cost" sentence.
+
+### Minor
+
+#### m1. `leave` is not idempotent after it deletes the clone
+
+§5 step 4 removes the agent's hive clone. §5 also says a second leave is a no-op with exit 0. The second call has no checkout left in which to see the tombstone.
+
+**Fix.** If the member is already tombstoned, or this agent's clone is already gone, exit 0 and print that. Do not re-clone.
+
+#### m2. The master session never leaves
+
+Finish releases the baton and does not tombstone the member (§9 step 6). The master stays in `load_registry`. `leave` removes `MAIN/.worktrees/<id>` (§5); the master's worktree is `MAIN/.worktrees/integration` (§4.1). Running leave on a master id does not touch the integration worktree, and nothing in §9 calls leave.
+
+**Fix.** Finish tombstones the master member and removes the master's hive clone. It keeps `.worktrees/integration` and the `swarm/integration` branch. `leave` on a baton holder uses that same worktree rule.
+
+#### m3. Id grammar
+
+"Highest `n`" has to be the integer maximum. Lexical order makes `claude-9` win over `claude-10`, and the next id collides with an existing member. The short harness prefix has to match `^[a-z0-9][a-z0-9_-]{0,63}$` (`registry._AGENT_ID`) or the member file cannot be loaded.
+
+#### m4. The brief is both private and optional to send
+
+D6: the free text is not stored, not sent, not checked. §8: whether the hello mentions the brief is the worker's judgement. Pick one. D6 is the decision; the hello should not include the brief.
+
+#### m5. Member tombstone stamps
+
+Claim tombstones use `YYYYMMDDTHHMMSSZ` (§13 of the v0.2 spec). §3.1 and §5 write `member.left.<UTC stamp>` and `member.left.<stamp>` without pinning the form. Colons in an ISO timestamp are legal on Linux and macOS and diverge from the claim names. Use the claim stamp.
+
+#### m6. Tests the move and this review need
+
+`tests/test_cli.py` reads `ROOT/SKILL.md` and `ROOT/scripts/`. Both move. A root `SKILL.md` left behind would shadow the three skills; the packaging test should fail if one exists. There is no schema for `member.json` next to the other files in `docs/specs/schema/`. §11 does not mention C1's harness procedure, M1's expired claim, M5's missing `op`, M6's merge loop, or M7's `refs/heads/swarm` collision.
+
+### Nit
+
+#### n1. `npx skills update -g` updates every global skill
+
+Say `npx skills update rip-swarm swarm-master swarm-worker -g` (or whatever the CLI accepts for a set) so an update of this package is not an update of everything else on the machine.
+
+#### n2. "3–8 tasks" is prose
+
+A one-step goal gets padded and a large one gets squeezed. The band is a hint to the model; the hive should accept whatever was posted.
+
+#### n3. Join bases branches on `HEAD`
+
+Uncommitted work in the project worktree is not on `swarm/integration`. §4.1 should say that in the printout when it happens, next to the existing "base branch missing" line.
+
+### Verification done for this review
+
+```text
+# local branch swarm blocks swarm/integration; origin/swarm does not
+fatal: cannot lock ref 'refs/heads/swarm/integration': 'refs/heads/swarm' exists
+# git -C <repo>/.git/rip-swarm rev-parse --show-toplevel
+fatal: this operation must be run in a work tree
+```
+
+Helpers cited above were read on the working tree. The skills CLI discovery rule (root `SKILL.md` shadows `skills/<name>/SKILL.md`; agent id `grok`) was checked against the current `npx skills` docs. No hive was modified.
+
+
+---
+
+## 14. Dispositions (revision 2, 2026-09-26)
+
+Every finding was checked against the code or reproduced before folding in. **C1 was verified from the harness docs:** Grok `toolset.bash.timeout_secs` defaults to 120s, and background commands notify on completion (`20-background-tasks.md`); Claude Code's Bash ceiling is 600s and background runs re-invoke the session. The finding's "Grok backgrounds after ~15s" detail is not in Grok's docs and was not confirmed, but the fix does not depend on it.
+
+| Finding | Disposition | Where |
+|---------|-------------|-------|
+| C1 | Accepted. `wait` always runs in the background, and the completion is the wake. There is a per-harness table, and only a `wake …` line counts. A per-agent lock file (enforced by `wait`, not only by prose) prevents a second `wait`. `--timeout` becomes the idle window (default 30m) and is independent of harness limits. | §7, §7.1, §8, §9 |
+| M1 | Accepted. An expired, unstolen claim is open (worker `task-available`) and is reported to the master once per expiry. | §7.2, §7.3 |
+| M2 | Accepted, with a different mechanism than suggested: inbox tasks gain `after: [ids]`, and the master posts the whole plan at once. `blocked` is derived from the board, so no mutable flag file is needed. `claim` refuses blocked tasks, and `all-complete` is false while any task is blocked. | §7.4, §9, §10 |
+| M3 | Accepted. `n` spans member files and `registry.yaml` (integer maximum). `publish_member` turns add/add on that exact path into `MemberTaken` and retries; other rebase failures stay exit 1. | §3.2 |
+| M4 | Accepted. `join` does its own bootstrap (temp-dir push only, attach on a lost push), never uses `init_hive`'s clone or `.gitignore` steps, and says bootstrap is the only step that *creates* the branch. It uses the same identity fallback as `_bootstrap`. | §4.1 steps 1–4 |
+| M5 | Accepted. `op` preflight comes before any member exists, with a migration message. Any failure after the member publish undoes the member. Exit 2 is reserved for a live baton or a lost baton race, and names the holder. | §3.3, §4.1 steps 5–7, §4.3 |
+| M6 | Accepted, generalised: an agent's own `release` marks the next generation as seen for that agent only. | §7.3, §8 step 3.4 |
+| M7 | Accepted. The project-side prefix is `rip-swarm/`, and `join` refuses if `refs/heads/rip-swarm` exists. | §1 Names, §4.1, §4.3 |
+| M8 | Accepted. The master heartbeats the baton before each merge, acceptance check and the synthesis. | §7.6, §9 |
+| M9 | Accepted. `join` seeds local state from the current board, and a lost state file is re-seeded, never replayed. | §4.1 step 9, §7.5 |
+| m1 | Accepted. `leave` exits 0 with `already left` when tombstoned or the clone is gone, and never re-clones. | §5 |
+| m2 | Accepted. The master's finish runs `leave`. `leave` never touches the integration worktree or branch. | §5, §9 step 6 |
+| m3 | Accepted. Integer maximum, and the prefix is sanitised to `registry._AGENT_ID`. | §3.2 |
+| m4 | Accepted per D6. The hello body is exactly `joined`. | §8 |
+| m5 | Accepted. The claim stamp form `YYYYMMDDTHHMMSSZ` is used. | §3.1, §5 |
+| m6 | Accepted. Test paths follow the move, the packaging test fails on a root `SKILL.md`, there is a `member.schema.json`, and §11 covers C1, M1, M5, M6 and M7. | §2.1, §3.1, §11 |
+| n1 | Accepted. `npx skills update rip-swarm swarm-master swarm-worker -g`; the CLI takes a skill list (`update [skills...]`). | §2.2 |
+| n2 | Accepted. The count is a judgement, and no helper checks it. | §9 step 3 |
+| n3 | Accepted. A `NOTE=` line is printed whenever a branch is based on `HEAD`, and when `MAIN` is dirty. | §4.1 step 10 |
