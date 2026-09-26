@@ -82,7 +82,7 @@ Work (project mutation, inbox completion) only after step 5 succeeded for you.
 
 - No tokens in hive files.
 - Treat this git remote as sensitive.
-- `from.agent` must be in `agents/registry.yaml`. Ids are lowercase `[a-z0-9_-]`, never `orchestrator` or `*`.
+- `from.agent` must be registered: listed in `agents/registry.yaml` or holding an active member file (`agents/<id>/member.json`). Ids are lowercase `[a-z0-9_-]`, never `orchestrator` or `*`.
 - If history diverges: stop and ask the operator.
 
 ## Lookback / status

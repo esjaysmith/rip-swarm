@@ -29,7 +29,7 @@ python3 "$SKILL_DIR/scripts/leave.py" --hive "$HIVE" --agent "$AGENT"
 
 It prints `KEY=value` lines: `VERSION`, `AGENT`, `ROLE`, `HARNESS`, `HIVE`, `WORKTREE`, `BRANCH`, `INTEGRATION` and `NOTE`. Exit 2 means another master holds the baton.
 
-`leave` releases your claims and the baton, marks your membership left, removes your worktree if it is clean and merged, and removes the hive clone. Running it twice is safe.
+`leave` releases your claims and the baton, marks your membership left, removes your worktree if it is clean and merged, and removes your own hive clone (`<common-dir>/rip-swarm/hive-<id>`; any other `--hive`, such as a shared `./_swarm`, is kept). Running it twice is safe.
 
 ## Wait (always in the background)
 

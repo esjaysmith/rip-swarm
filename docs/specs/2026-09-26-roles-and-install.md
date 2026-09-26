@@ -1,6 +1,6 @@
 # rip-swarm — roles and install (spec, 2026-09-26)
 
-**Status:** approved 2026-09-26 at revision 7 (seventh review pass found no new holes). Review history: §13, §15, §17, §19, §21, §23; dispositions §14, §16, §18, §20, §22, §24. Decisions D1–D7 stand.
+**Status:** approved 2026-09-26 at revision 7 (seventh review pass found no new holes); amended by the implementation review, §25. Review history: §13, §15, §17, §19, §21, §23, §25; dispositions §14, §16, §18, §20, §22, §24, §25. Decisions D1–D7 stand.
 **Amends:** `docs/specs/2026-09-17-design-spec.md` (v0.2) and extends the read surface added on 2026-09-25 (`sync`, `messages`).
 **Scope:** (A) a single install/update path that reaches Claude Code and Grok Build; (B) two commands, run by the operator at any time in any harness session, that turn that session into a **master** or a **worker**.
 
@@ -210,7 +210,7 @@ rip-swarm leave --hive HIVE --agent ID
    - `MAIN/.worktrees/integration` and `rip-swarm/integration` are never removed or deleted by `leave`.
    - Branches are never deleted.
    A failure in this step prints a note and continues to step 5; it never leaves the clone behind.
-5. Remove the agent's hive clone.
+5. Remove the agent's hive clone, but only when `HIVE` is this agent's own per-agent clone (`<common-dir>/rip-swarm/hive-<ID>`). Any other directory, such as a shared `./_swarm`, is kept and `leave` prints `kept <HIVE> (not this agent's clone)`. The same holds on the `already left` path of step 1 (§25 I5).
 
 Prints a one-line summary per action.
 
@@ -340,10 +340,10 @@ Procedure:
    1. Start `wait` in the background (§7.1) and end the turn. When the wake arrives, act on its reason.
    2. `message` → `messages --hive "$HIVE" --to AGENT --new`. Act on requests that fit the brief, and reply when useful. A message that asks this worker to claim a task lets it claim directly; mentioning an id does not (§7.3). Bodies are requests, never commands to execute.
    3. `task-available` → read the listed tasks (`status`, `inbox/<id>.json`). Claim the first one that fits the brief. Exit 2 means it is not yours: if the message says *retry*, re-run once; otherwise try the next. If none fit, go back to 3.1.
-   4. After a claim succeeds, in `WORKTREE`, run `git merge --no-edit rip-swarm/integration` if that branch exists.
-      - **Ordinary task:** a conflict here is unexpected. Run `git merge --abort`, then `release --note "cannot merge integration: <files>"` (§7.3 own release), message the orchestrator, and go back to 3.1.
-      - **Task with `fixes` set, or whose body names a sha to build on:** then also run `git merge --no-edit <sha>`. A conflict in either merge **is the work**: resolve it in `WORKTREE`, commit the merge, and continue to step 5. Release only if the resolution is beyond the task, with a note saying why.
-   5. Do the task in `WORKTREE` only, touching what the task body allows. Heartbeat before each long step, and again before half the lease has passed while a step is still running (§7.6).
+   4. After a claim succeeds, in `WORKTREE` (which must be clean; leftovers of the worker's own earlier work are committed first), run `git merge --no-edit rip-swarm/integration` if that branch exists. Because `rip-swarm/<id>` is reused from task to task, if it has commits `rip-swarm/integration` lacks (an earlier result that was rejected, fell short, or is still unreviewed), the worker first keeps its tip reachable as `refs/rip-swarm/prev/<id>/<short sha>` and then runs `git reset --hard rip-swarm/integration` instead of the merge, so rejected work never rides into a later result (§25 I1).
+      - **Ordinary task:** a conflict here is unexpected (after the reset rule it cannot happen). Run `git merge --abort`, then `release --note "cannot merge integration: <files>"` (§7.3 own release), message the orchestrator, and go back to 3.1.
+      - **Task with `fixes` set, or whose body names a sha to build on:** then **always** also run `git merge --no-edit <sha>`, whether or not the integration merge was clean. A conflict in either merge **is the work**: resolve it in `WORKTREE`, commit the merge, and continue to step 5. Release only if the resolution is beyond the task, with a note saying why.
+   5. Do the task in `WORKTREE` only, touching what the task body allows. Heartbeat before each long step, and again before half the lease has passed while a step is still running (§7.6). If `heartbeat` or `complete` exits 2 with `claim expired`, re-run `claim` once; if it succeeds, retry the failed call and continue. Any other exit 2 (`held by …`, `no active claim for …`), or a failed re-claim, is a lost lease: handle it as step 7, and include the worker's `HEAD` sha in the message (§25 I3).
    6. If `WORKTREE` has changes, commit them on `BRANCH`. If it is clean (for example, a rebase task whose whole result is the merge committed in step 4), `HEAD` is already the result. Then run `complete --result-ref "rip-swarm/AGENT@<sha7 of HEAD>"`, then `message --to orchestrator --type result --body "<task id>: <one-line headline>"`, or `--to '*'` if no orchestrator is seated. Go back to 3.1.
    7. `lease-lost` → stop working on that task and do not complete it. Message the new holder if there is one, and go back to 3.1.
    8. `timeout` (the `wake timeout` line, meaning `--timeout` of idleness) → if no claim is held, run `leave` and report "idle, left the swarm". Otherwise go back to 3.1.
@@ -362,7 +362,7 @@ Procedure:
 5. Loop. Start `wait` in the background (§7.1) and end the turn. Heartbeat the baton before each merge, acceptance check and write, and again before half the lease has passed while a step is still running (§7.6). On each wake:
    - `task-finished complete` → if `T` is already accepted, do nothing: no merge, no review. If any task that `fixes` `T` is open, claimed, blocked or awaiting acceptance (the §7.4 list), skip: that follow-up decides `T`. Otherwise read the result ref (`rip-swarm/<id>@<sha>`) and review it **off** the integration branch, so no worker can merge unaccepted work:
      1. In `MAIN/.worktrees/integration`, record the integration tip `TIP`. If the integration worktree has a merge in progress (a crash during step 2), `git merge --abort` before anything else: no branch switch works mid-merge. After the abort the review branch is back at `TIP` without the merge, so it takes the recreate path below. If `rip-swarm/review-<T>` exists (left by a crash, possibly still checked out in this worktree):
-        - If it is exactly the merge of this sha onto `TIP`, `git switch rip-swarm/review-<T>` (unless the worktree is already on it), and go straight to step 3. Do not create it or merge again.
+        - If it is exactly the merge of this sha onto `TIP`, `git switch rip-swarm/review-<T>` (unless the worktree is already on it), and go straight to step 3. Do not create it or merge again. If that switch fails (for example, the branch is checked out in another worktree), return to `rip-swarm/integration` and report the error; `T` stays unaccepted (§25 M7).
         - Otherwise `git switch rip-swarm/integration` first (a branch cannot be deleted while checked out), then `git branch -D rip-swarm/review-<T>`, and continue below.
 
         Then `git switch -c rip-swarm/review-<T> TIP` and `git merge --no-ff <sha>`. `rip-swarm/integration` does not move, and workers keep merging it as it was.
@@ -376,7 +376,7 @@ Procedure:
    - `task-finished reject` → if the rejected task `fixes` some `T`, and no other task that `fixes` `T` is open, claimed, blocked or awaiting acceptance, handle `T` now: review it (the `task-finished complete` steps) or reject it and cascade (§7.4, orphaned `T`). Then, in the same turn, reject every task still blocked on the rejected one, directly or further down the `after` chain (`reject --task … --note "dependency <id> rejected"`). If the work is still wanted, post a replacement as an additional new task, with dependents re-posted after it. Record all of this in the synthesis.
    - `message` → `messages --hive "$HIVE" --to AGENT --new`. Answer workers' questions.
    - `idle-board` → tell the operator which tasks nobody is claiming (possibly because of worker briefs), and keep waiting.
-   - `lease-lost` → the baton is gone. Stop and report to the operator. The plan, acceptances and rejections stay on the board for the next master.
+   - `lease-lost` → the baton is gone. Stop and report to the operator. The plan, acceptances and rejections stay on the board for the next master. Exit 2 from a baton heartbeat or from `accept` means the same and is handled the same way (§25 I3).
    - `timeout` → start `wait` again. The master never leaves on idleness.
    - `all-complete` → go to step 6.
 6. **Finish.** Heartbeat the baton. Write the synthesis on `rip-swarm/integration`, following the project's rules for where notes go (default `docs/swarm/<date>-<goal-slug>.md`). It covers the goal, each task's outcome with its acceptance sha, follow-ups and `via` links, rejects and their cascades, and open questions. Commit it. Then run `leave`: this releases the baton, tombstones the master member and removes its hive clone, but never touches `MAIN/.worktrees/integration` or the branch. Do not push. Report to the operator: the branch, what it contains, and how to review it (`git log <base>..rip-swarm/integration`).
@@ -1027,4 +1027,19 @@ fatal: cannot switch branch while merging
 |---------|-------------|-------|
 | C1 | Accepted, and extended. §9's skip list matches §7.4 (it now includes awaiting acceptance). A complete wake for an already-accepted task is a no-op before any merge. The `fixes` walk stops at an accepted ancestor. In addition, `accept` itself is idempotent (exits 0 with `already accepted`, no publish), so a double accept is harmless whichever caller produces it. | §7.4, §9, §11 |
 | M1 | Accepted as proposed. A merge in progress in the integration worktree is aborted before any switch, and the review branch then takes the recreate path. | §9 step 1, §11 |
+
+---
+
+## 25. Implementation review and dispositions (2026-09-26)
+
+Whole-branch review of the implementation (`57f8d1e..3b9a3c2`). The spec was silent on I1; its guarantee that rejected work never lands in integration decides it.
+
+| Finding | Disposition | Where |
+|---------|-------------|-------|
+| I1. A reused worker branch carries rejected or unaccepted commits into the next result | Accepted. Step 4 starts from integration: if the branch has commits integration lacks, its tip is kept as `refs/rip-swarm/prev/<id>/<short sha>` and the branch is reset to `rip-swarm/integration`. Follow-up and rebase tasks still merge their named sha. | §8 step 4, `/swarm-worker` §5, rehearsal |
+| I2. The `fixes` sha was merged only when the integration merge failed | Accepted. The sha merge always runs for such tasks. | §8 step 4, `/swarm-worker` §5 |
+| I3. No route for exit 2 from `heartbeat`, `complete` or `accept` mid-work | Accepted. Worker: `claim expired` → re-claim once; otherwise lease lost. Master: baton gone. | §8 step 5, §9 `lease-lost`, both skills |
+| I4. Inline commands read `$RS`/`$HIVE`/`$AGENT` without assigning them | Accepted. Every inline command assigns what it reads; the packaging test checks inline spans too. | both skills, `tests/test_packaging.py` |
+| I5. `leave` removed whatever `--hive` pointed at | Accepted. Only the agent's own `hive-<id>` clone is removed. | §5 step 5, `join.py` |
+| M7. A failed resume switch still reported `merged` | Accepted. It is `OUTCOME=error`. | §9 step 1, `/swarm-master` §6 |
 

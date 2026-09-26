@@ -49,7 +49,7 @@ Watch from your own read-only clone, never from an agent's hive clone: syncing t
 ## Close-out
 
 1. Review `git log m37-swarm-trial..rip-swarm/integration` and merge it where you want it.
-2. Run `lookback.py` from any remaining hive clone.
+2. Run the lookback from `~/hive-watch`. This one step writes and publishes, so it is the exception to "read-only": `python3 ~/.agents/skills/rip-swarm/scripts/sync.py --hive ~/hive-watch && python3 ~/.agents/skills/rip-swarm/scripts/lookback.py --hive ~/hive-watch`. If you would rather keep `~/hive-watch` untouched, attach a fresh clone first (`python3 ~/.agents/skills/rip-swarm/scripts/init.py --hive /tmp/hive-lookback`, run inside the project) and pass that as `--hive`.
 3. Fill in Results below and file each finding as a rip-swarm fix.
 
 ## Results
