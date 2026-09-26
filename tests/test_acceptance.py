@@ -75,6 +75,41 @@ class TestAcceptance(unittest.TestCase):
         self.assertEqual(path.read_text(encoding="utf-8"), before)
         self.assertEqual(json.loads(before)["integration_sha"], first["integration_sha"])
 
+    def test_accept_refuses_a_rejected_task(self):
+        t = self._task("t")
+        self._done(t)
+        master_reject(self.hive, agent="alice", task_id=t, note="not worth pursuing", now=T0)
+        with self.assertRaises(ClaimDenied) as ctx:
+            accept_task(self.hive, agent="alice", task_id=t, integration_sha=SHA, now=T0)
+        self.assertEqual(str(ctx.exception), f"{t} is rejected; it cannot be accepted")
+        self.assertFalse(HivePaths(self.hive).accepted_record(t).exists())
+
+    def test_accept_via_refuses_a_rejected_task(self):
+        t = self._task("t")
+        self._done(t)
+        f = self._task("f", fixes=t)
+        self._done(f)
+        accept_task(self.hive, agent="alice", task_id=f, integration_sha=SHA, now=T0)
+        master_reject(self.hive, agent="alice", task_id=t, note="dropped", now=T0)
+        with self.assertRaises(ClaimDenied):
+            accept_task(self.hive, agent="alice", task_id=t, integration_sha=SHA, via=[f], now=T0)
+        self.assertFalse(HivePaths(self.hive).accepted_record(t).exists())
+
+    def test_cli_accept_refuses_a_rejected_task(self):
+        clock = mock.patch("rip_swarm.cli.now_utc", return_value=T0)
+        clock.start()
+        self.addCleanup(clock.stop)
+        t = self._task("t")
+        self._done(t)
+        master_reject(self.hive, agent="alice", task_id=t, note="not worth pursuing", now=T0)
+        out, err = io.StringIO(), io.StringIO()
+        with redirect_stdout(out), redirect_stderr(err):
+            rc = main(["accept", "--hive", str(self.hive), "--local", "--agent", "alice",
+                       "--task", t, "--integration-sha", SHA])
+        self.assertEqual((rc, out.getvalue()), (2, ""))
+        self.assertIn(f"{t} is rejected; it cannot be accepted", err.getvalue())
+        self.assertFalse(HivePaths(self.hive).accepted_record(t).exists())
+
     def test_accept_rejects_a_non_hex_sha(self):
         t = self._task("t")
         self._done(t)

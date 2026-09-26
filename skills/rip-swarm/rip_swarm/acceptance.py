@@ -51,11 +51,15 @@ def accept_task(
     now: datetime,
 ) -> dict:
     """Write the create-only `accepted/<T>.json`. Idempotent: an existing record
-    is `{"task_id": T, "already": True}` and nothing is written."""
+    is `{"task_id": T, "already": True}` and nothing is written. A rejected task
+    is refused, `--via` or not: a reject is final (spec §7.4)."""
     _require_task(hive, task_id)
     _require_master(hive, agent, now)
     if is_accepted(hive, task_id):
         return {"task_id": task_id, "already": True}
+    view = read_board(hive, now)[task_id]
+    if view.rejected:
+        raise ClaimDenied(f"{task_id} is rejected; it cannot be accepted")
     if not _SHA.fullmatch(integration_sha or ""):
         raise ValueError(f"--integration-sha must be a hex commit id, got {integration_sha!r}")
     via = list(dict.fromkeys(via))
@@ -64,7 +68,7 @@ def accept_task(
             _require_task(hive, fixer)
             if not is_accepted(hive, fixer):
                 raise ClaimDenied(f"via task {fixer} is not accepted")
-    elif not read_board(hive, now)[task_id].completed:
+    elif not view.completed:
         raise ClaimDenied(f"{task_id} has no complete tombstone")
     doc = {
         "task_id": task_id,
