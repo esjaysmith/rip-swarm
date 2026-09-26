@@ -196,6 +196,13 @@ class TestPackaging(unittest.TestCase):
         # A merge resolution never opens an editor.
         self.assertIn('git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit --no-edit', text)
 
+    def test_worker_step_one_runs_once_per_task(self):
+        # Re-running it mid-task resets the branch (the task's commits go to
+        # refs/rip-swarm/prev) or commits conflict markers via SYNC=dirty.
+        text = self._text("swarm-worker")
+        self.assertIn("Run this block **exactly once** per task, right after the claim succeeds", text)
+        self.assertIn("never after you have started or committed work for this task", text)
+
     def test_worker_merges_integration_only_when_it_exists(self):
         text = self._text("swarm-worker")
         self.assertIn('show-ref --verify --quiet refs/heads/rip-swarm/integration', text)

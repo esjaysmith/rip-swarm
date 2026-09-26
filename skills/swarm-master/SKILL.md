@@ -149,7 +149,7 @@ After starting it, end your turn. Only a line that starts with `wake ` is a wake
         WORKTREE=<WORKTREE>; T=<T>
         git -C "$WORKTREE" switch rip-swarm/integration && git -C "$WORKTREE" branch -D "rip-swarm/review-$T"
         ```
-        Integration never contained the sha; it stays only on the worker's branch.
+        Integration never contained the sha. It stays reachable on the worker's branch or, once that worker has started another task, under `refs/rip-swarm/prev/<worker>/<sha>`; either way the sha is all a follow-up needs.
      2. Post a follow-up with `--fixes <T>`, whose body names `<SHA>` to build on and the gap to close.
      3. Do not fix it yourself.
    - **Not worth pursuing:** run the same command as *Falls short*, then `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" reject --hive "$HIVE" --task <T> --agent "$AGENT" --note "<why>"`, and cascade (below).
