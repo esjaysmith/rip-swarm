@@ -36,12 +36,19 @@ def create_task(
     body: str | None = None,
     task_id: str | None = None,
     now: datetime | None = None,
+    after: list[str] | None = None,
+    fixes: str | None = None,
 ) -> dict:
     title = title.strip()
     if not title:
         raise InboxError("title is required")
     if not created_by.strip():
         raise InboxError("created_by is required")
+    deps = list(dict.fromkeys(after or []))
+    for ref in [*deps, *([fixes] if fixes else [])]:
+        validate_task_id(ref)
+        if not HivePaths(hive).inbox_task(ref).is_file():
+            raise InboxError(f"unknown task {ref}: post it before tasks that refer to it")
     ts = now or now_utc()
     tid = validate_task_id(task_id) if task_id is not None else new_task_id(ts)
     doc = {
@@ -52,6 +59,10 @@ def create_task(
     }
     if body is not None:
         doc["body"] = body
+    if deps:
+        doc["after"] = deps
+    if fixes:
+        doc["fixes"] = fixes
     excl_create_json(HivePaths(hive).inbox_task(tid), doc)
     return doc
 

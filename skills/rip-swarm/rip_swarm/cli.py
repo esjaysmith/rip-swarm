@@ -86,6 +86,9 @@ def _parser() -> argparse.ArgumentParser:
     inbox_p.add_argument("--title", required=True)
     inbox_p.add_argument("--created-by", required=True)
     inbox_p.add_argument("--body")
+    inbox_p.add_argument("--after", action="append", default=[],
+                         help="task id this task waits on (repeatable; must exist)")
+    inbox_p.add_argument("--fixes", help="task id this follow-up or rebase task fixes")
 
     claim_p = sub.add_parser("claim", parents=[common], help="claim a task")
     claim_p.add_argument("--task", required=True)
@@ -257,6 +260,8 @@ def _inbox_add(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
             created_by=args.created_by,
             body=args.body,
             now=now,
+            after=args.after,
+            fixes=args.fixes,
         )
 
     return _run_op(

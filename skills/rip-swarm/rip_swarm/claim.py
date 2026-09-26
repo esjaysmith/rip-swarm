@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rip_swarm.audit import append_claim_audit
+from rip_swarm.board import blocked_by, finished_reason
 from rip_swarm.ids import new_claim_id
 from rip_swarm.inbox import InboxError, validate_task_id
 from rip_swarm.io import (
@@ -146,6 +147,12 @@ def try_claim(
     _require_registered(hive, agent, harness)
     if not HivePaths(hive).inbox_task(task_id).exists():
         raise ClaimDenied(f"no inbox task {task_id}")
+    reason = finished_reason(hive, task_id)
+    if reason is not None:
+        raise ClaimDenied(f"{task_id} {reason}")
+    waiting = blocked_by(hive, task_id)
+    if waiting:
+        raise ClaimDenied(f"blocked by {', '.join(waiting)}")
     return _create_claim(hive, task_id, agent, harness, now, lease_seconds, note)
 
 
