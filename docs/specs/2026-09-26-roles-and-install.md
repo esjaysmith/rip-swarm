@@ -1,6 +1,6 @@
 # rip-swarm — roles and install (spec, 2026-09-26)
 
-**Status:** revision 6, folding the fifth review (§21). Dispositions: §14 for §13, §16 for §15, §18 for §17, §20 for §19, and §22 for §21. Awaiting operator review. Decisions D1–D7 stand.
+**Status:** revision 7, folding the sixth review (§23). Dispositions: §14 for §13, §16 for §15, §18 for §17, §20 for §19, §22 for §21, and §24 for §23. Awaiting operator review. Decisions D1–D7 stand.
 **Amends:** `docs/specs/2026-09-17-design-spec.md` (v0.2) and extends the read surface added on 2026-09-25 (`sync`, `messages`).
 **Scope:** (A) a single install/update path that reaches Claude Code and Grok Build; (B) two commands, run by the operator at any time in any harness session, that turn that session into a **master** or a **worker**.
 
@@ -283,7 +283,7 @@ The role comes from the board: `ID` is master if it holds the live baton, else w
 rip-swarm accept --hive HIVE --agent MASTER --task T --integration-sha SHA [--via F …]
 ```
 
-This writes the create-only `accepted/<T>.json` (`{task_id, by, at, integration_sha, via}`) and publishes it. Only the live baton holder may run it. `T` must have a `complete` tombstone, or every `--via` task must be accepted. `--via` accepts a task through the follow-ups that fixed it (§9). A task is **accepted** when this file exists. The record lives in the hive, so `claim` and `wait` never need the project repo.
+This writes the create-only `accepted/<T>.json` (`{task_id, by, at, integration_sha, via}`) and publishes it. Only the live baton holder may run it. `T` must have a `complete` tombstone, or every `--via` task must be accepted. `--via` accepts a task through the follow-ups that fixed it (§9). A task is **accepted** when this file exists. `accept` is **idempotent**: if `accepted/<T>.json` already exists, it prints `already accepted T` and exits 0 without writing or publishing. A second accept, from a handoff, a re-seed, or the `fixes` walk, is never a failure. The record lives in the hive, so `claim` and `wait` never need the project repo.
 
 **`after`.**
 - Inbox tasks gain an optional `after: [task_id, …]` field: `inbox-add --after ID` (repeatable). Each id must already exist in the inbox at creation, so the master posts a plan in dependency order. The inbox schema gains the field.
@@ -360,15 +360,15 @@ Procedure:
 3. **Plan.** Split the goal into tasks. Aim for units a worker can finish in one sitting, usually a handful; the count is a judgement and no helper checks it. Each task body states what to produce, which files or directories it may touch, and the acceptance check. Express order with `--after`, and post the **whole** plan now.
 4. Post the tasks in dependency order, so every `--after` target already exists: `inbox-add --created-by AGENT [--after …]`. Broadcast the goal once: `message --to '*' --type note --body "goal: <goal>"`.
 5. Loop. Start `wait` in the background (§7.1) and end the turn. Heartbeat the baton before each merge, acceptance check and write, and again before half the lease has passed while a step is still running (§7.6). On each wake:
-   - `task-finished complete` → if any task that `fixes` `T` is open, claimed or blocked, skip: that follow-up decides `T`. Otherwise read the result ref (`rip-swarm/<id>@<sha>`) and review it **off** the integration branch, so no worker can merge unaccepted work:
-     1. In `MAIN/.worktrees/integration`, record the integration tip `TIP`. If `rip-swarm/review-<T>` exists (left by a crash, possibly still checked out in this worktree):
+   - `task-finished complete` → if `T` is already accepted, do nothing: no merge, no review. If any task that `fixes` `T` is open, claimed, blocked or awaiting acceptance (the §7.4 list), skip: that follow-up decides `T`. Otherwise read the result ref (`rip-swarm/<id>@<sha>`) and review it **off** the integration branch, so no worker can merge unaccepted work:
+     1. In `MAIN/.worktrees/integration`, record the integration tip `TIP`. If the integration worktree has a merge in progress (a crash during step 2), `git merge --abort` before anything else: no branch switch works mid-merge. After the abort the review branch is back at `TIP` without the merge, so it takes the recreate path below. If `rip-swarm/review-<T>` exists (left by a crash, possibly still checked out in this worktree):
         - If it is exactly the merge of this sha onto `TIP`, `git switch rip-swarm/review-<T>` (unless the worktree is already on it), and go straight to step 3. Do not create it or merge again.
         - Otherwise `git switch rip-swarm/integration` first (a branch cannot be deleted while checked out), then `git branch -D rip-swarm/review-<T>`, and continue below.
 
         Then `git switch -c rip-swarm/review-<T> TIP` and `git merge --no-ff <sha>`. `rip-swarm/integration` does not move, and workers keep merging it as it was.
      2. **Conflict:** `git merge --abort`, `git switch rip-swarm/integration`, `git branch -D rip-swarm/review-<T>`. Post a rebase task with `--fixes T`, whose body names the sha to build on (the worker resolves the conflict, §8 step 4), and message the worker. `T` stays unaccepted.
      3. **Merged:** check the result against the task's acceptance check on the review branch.
-        - **Passes:** `git switch rip-swarm/integration`. If its tip is still `TIP`, `git merge --ff-only rip-swarm/review-<T>`; otherwise (it cannot move while the master is the only writer, but the rule is stated) re-merge onto the new tip and re-check. Then `accept --task T --integration-sha <new tip>`. If `T` has `fixes: X`, also `accept --task X --via T`, following the chain as far as it goes. Delete the review branch (`git branch -d`, which works because it is merged). Dependents unblock.
+        - **Passes:** `git switch rip-swarm/integration`. If its tip is still `TIP`, `git merge --ff-only rip-swarm/review-<T>`; otherwise (it cannot move while the master is the only writer, but the rule is stated) re-merge onto the new tip and re-check. Then `accept --task T --integration-sha <new tip>`. If `T` has `fixes: X`, also `accept --task X --via T`, following the chain. The walk stops at the first ancestor that is already accepted; that stop is not a failure. Delete the review branch (`git branch -d`, which works because it is merged). Dependents unblock.
         - **Falls short:** `git switch rip-swarm/integration`, `git branch -D rip-swarm/review-<T>`. Integration never contained the sha; it stays only on the worker's branch. Post a follow-up with `--fixes T`, whose body names the sha to build on and the gap to close. Do not fix it yourself (D2).
         - **Not worth pursuing:** `git switch rip-swarm/integration`, `git branch -D rip-swarm/review-<T>`, then `reject --task T --note WHY` and cascade (below).
      4. Every path ends with the integration worktree on `rip-swarm/integration`, so the synthesis and later merges never land on a review branch.
@@ -459,6 +459,9 @@ Tests are written test-first with stdlib `unittest`, using real git against temp
   - Master handoff: master A's baton expires with a bare `complete` on the board. Master B joins and is woken `task-finished complete` for it once. With an open `fixes` task, B skips the review instead.
   - A crash-left review branch, still checked out in the integration worktree, is switched to and reused when it matches the sha onto `TIP`, with no second `switch -c` or merge. Otherwise the master switches to integration, force-deletes it, and recreates it.
   - `task-finished` is recorded on report: a skipped bare complete does not wake again, and the next tick reaches the other events.
+  - Handoff with both `T` (short) and `F` (`fixes T`) complete and unseen, in both report orders. If `F` is first, `F` is accepted, `T` is accepted `--via F`, and `T`'s wake is a no-op. If `T` is first, it is skipped because `F` is awaiting acceptance, then `F`'s pass accepts both. In neither order is there a failure or a second record.
+  - `accept` on an existing record prints `already accepted` and exits 0 without publishing.
+  - A crash mid-conflict on the review branch: the master aborts the merge, switches to integration, force-deletes the branch, and recreates it.
   - An orphaned `T`: its only `fixes` task is rejected, and the master reviews or rejects `T` in the same turn, so `all-complete` becomes reachable.
   - A rebase task whose whole result is the step-4 merge commit completes without a second commit (a clean tree is not an error).
   - A pass: integration fast-forwards to the review tip, and the review branch is deleted.
@@ -977,4 +980,51 @@ The rebase task's work is that merge. A literal step 6 stops the worker before `
 | M1 | Accepted as proposed. A matching crash-left review branch is switched to and the check resumes, with no create and no re-merge. Otherwise the worktree switches to integration first, then `git branch -D`, then `switch -c`. | §9 step 1, §11 |
 | M2 | Accepted. Step 6 commits only when the worktree has changes; otherwise `HEAD` is the result that `complete` reports. | §8 step 6, §11 |
 | m1 | Accepted. §10 names `after` and `fixes`, and the finished-task refusal. | §10 |
+
+---
+
+## 23. Sixth review (2026-09-26) — `a569777`
+
+**Verdict:** needs revision (1 critical, 1 major).
+**Reviewed tip:** `a569777` (`docs: roles/install spec revision 6 — fold fifth review`) on `feat/roles-and-install`.
+**§21 is folded.** `task-finished` is recorded on report, a rejected fixer sends the master back to `T`, a checked-out review branch is switched off before `git branch -D`, and a clean rebase tree is not a second commit. The findings below are what that fold still does.
+
+### Critical
+
+#### C1. A second bare complete accepts `T` twice
+
+`accept` is create-only (§7.4). The pass path always calls it, then walks `fixes` and calls it again for each ancestor (§9). A helper that finds the record already there exits 1, and §7.6 stops the master on a helper failure.
+
+That happens whenever two bare completes are both unseen, which is a new master or a re-seed (§7.5 excludes bare completes from the seed). `T` fell short and `F` (`fixes T`) has also completed:
+
+- `F` is reported first. The master accepts `F` and, through the chain, accepts `T`. `T`'s complete is still unseen. The next tick reviews `T` and calls `accept` again.
+- `T` is reported first. §9 skips that review only when a fixer is open, claimed or blocked. §7.4 also skips when a fixer is **awaiting acceptance**, and `F` is exactly that. §9 reviews `T` anyway and may accept it. `F`'s later pass then accepts `T` again through the chain.
+
+The live shortfall path never does this: `T`'s one wake is consumed before `F` exists. The handoff in §11, once `F` has completed too, does.
+
+**Fix.** §9's skip list matches §7.4, including awaiting acceptance. A `task-finished complete` for a task that is already accepted is a no-op, before any merge. The `fixes` walk stops when the ancestor's record exists. It does not publish a second one, and that stop is not a failure.
+
+### Major
+
+#### M1. Crash recovery switches branches while a merge is in progress
+
+§9, for a crash-left review branch that is not the finished merge, runs `git switch rip-swarm/integration` and then `git branch -D`. A crash during the conflict in step 2 leaves the integration worktree mid-merge, with the review branch checked out. Reproduced:
+
+```text
+CONFLICT (content): Merge conflict in a.txt
+fatal: cannot switch branch while merging
+```
+
+`git branch -D` is never reached. The reuse test in §11 does not cover an unfinished merge, only a branch that already is or is not the merge commit.
+
+**Fix.** If the worktree has a merge in progress, `git merge --abort` before any switch. Then the reuse-or-recreate rule runs as written.
+
+---
+
+## 24. Dispositions (revision 7, 2026-09-26)
+
+| Finding | Disposition | Where |
+|---------|-------------|-------|
+| C1 | Accepted, and extended. §9's skip list matches §7.4 (it now includes awaiting acceptance). A complete wake for an already-accepted task is a no-op before any merge. The `fixes` walk stops at an accepted ancestor. In addition, `accept` itself is idempotent (exits 0 with `already accepted`, no publish), so a double accept is harmless whichever caller produces it. | §7.4, §9, §11 |
+| M1 | Accepted as proposed. A merge in progress in the integration worktree is aborted before any switch, and the review branch then takes the recreate path. | §9 step 1, §11 |
 
