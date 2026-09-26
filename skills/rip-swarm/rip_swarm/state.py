@@ -80,8 +80,10 @@ def ensure_state(hive: Path, agent: str) -> tuple[dict, bool]:
 
 
 def mark_seen_open(hive: Path, agent: str, key: str) -> None:
-    state = load_state(hive, agent)
-    if state is None or key in state["seen_open"]:
+    # Seed a missing state first, so the next `wait` does not re-offer the
+    # generation this agent just released (spec §7.3).
+    state, _ = ensure_state(hive, agent)
+    if key in state["seen_open"]:
         return
     state["seen_open"].append(key)
     save_state(hive, state)

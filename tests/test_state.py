@@ -22,6 +22,7 @@ from rip_swarm.state import (
     acquire_wait_lock,
     ensure_state,
     load_state,
+    mark_seen_open,
     release_wait_lock,
     save_state,
     seed_state,
@@ -121,6 +122,14 @@ class TestState(unittest.TestCase):
             self.assertEqual(main(["release", "--hive", str(self.hive), "--local",
                                    "--task", t, "--agent", "bob", "--note", "cannot merge"]), 0)
         self.assertIn(f"{t}#1", load_state(self.hive, "bob")["seen_open"])
+
+    def test_release_without_state_seeds_it_then_marks_seen(self):
+        # Ruling c: a releaser with no state file must not be re-offered its release.
+        t = self._task("t")
+        self.assertIsNone(load_state(self.hive, "bob"))
+        mark_seen_open(self.hive, "bob", f"{t}#1")
+        state = load_state(self.hive, "bob")
+        self.assertEqual(state["seen_open"], [f"{t}#1"])
 
     def test_wait_lock(self):
         path = acquire_wait_lock(self.hive)

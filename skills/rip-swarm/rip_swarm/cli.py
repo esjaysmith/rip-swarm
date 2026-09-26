@@ -35,15 +35,19 @@ from rip_swarm.paths import resolve_hive
 from rip_swarm.policy import try_claim_with_policy
 from rip_swarm.profile import load_profile
 from rip_swarm.registry import require_agent
-from rip_swarm.state import ensure_state, mark_seen_open, save_state
+from rip_swarm.state import WaitRunning, ensure_state, mark_seen_open, save_state
 from rip_swarm.status import format_status, status_report
 from rip_swarm.timeutil import now_utc, parse_duration
+from rip_swarm.waiter import run_wait
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(list(sys.argv[1:] if argv is None else argv))
     try:
         result = _dispatch(args)
+    except WaitRunning as e:
+        print(e, file=sys.stderr)
+        return 3
     except ClaimDenied as e:
         print(e, file=sys.stderr)
         return 2
@@ -150,6 +154,12 @@ def _parser() -> argparse.ArgumentParser:
     msgs_p.add_argument("--type")
     msgs_p.add_argument("--new", action="store_true",
                         help="only messages to --to not shown before; advances its cursor")
+    wait_p = sub.add_parser(
+        "wait", parents=[common],
+        help="block until there is something for --agent to do; prints `wake <reason> [detail]`",
+    )
+    wait_p.add_argument("--timeout", type=int, default=1800, help="idle window in seconds")
+    wait_p.add_argument("--interval", type=int, default=30, help="seconds between checks")
     sub.add_parser("lookback", parents=[common], help="write a lookback report")
     return parser
 
@@ -173,6 +183,8 @@ def _dispatch(args: argparse.Namespace) -> object:
         return format_status(status_report(hive, now))
     if args.command == "sync":
         return _sync(hive)
+    if args.command == "wait":
+        return _wait(args, hive)
     if args.command == "messages":
         if args.new:
             return _messages_new(args, hive, now)
@@ -220,6 +232,14 @@ def _messages_new(args: argparse.Namespace, hive: Path, now: datetime) -> str:
         state["messages_cursor"] = [found[-1]["ts"], found[-1].get("id", "")]
         save_state(hive, state)
     return format_messages(found, [])
+
+
+def _wait(args: argparse.Namespace, hive: Path) -> str:
+    agent = _require(args.agent, "--agent")
+    wake, leases, notes = run_wait(hive, agent, timeout=args.timeout, interval=args.interval)
+    for note in notes:
+        print(note, file=sys.stderr)
+    return "\n".join([wake.line(), *leases])
 
 
 def _sync(hive: Path) -> str:
