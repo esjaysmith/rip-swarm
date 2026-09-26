@@ -216,7 +216,9 @@ class TestRehearsal(unittest.TestCase):
         a = self.m.post("A")
         b = self.m.post("B", "--after", a)
         c = self.m.post("C")
-        self.assertEqual(self.w1.tick(), Wake("task-available", " ".join(sorted([a, c]))))
+        first, second = sorted([a, c])
+        self.assertEqual(self.w1.tick(), Wake("task-available", first))    # one task per wake
+        self.assertEqual(self.w1.tick(), Wake("task-available", second))
         self.w2.tick()
         self.assertEqual(self.w1.claim(a), 0)
         self.assertEqual(self.w2.claim(a), 2)                       # lost: someone else holds it

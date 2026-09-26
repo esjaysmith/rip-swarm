@@ -86,13 +86,14 @@ def tick(
 def _worker_tick(board: dict[str, TaskView], held: list[dict], state: dict) -> Wake | None:
     if any(h["task"] != "orchestrator" for h in held):
         return None
-    fresh: list[str] = []
+    # One task per wake (a worker holds one claim): only the offered task is
+    # marked seen, so the next wait offers the next unseen one (§7.2).
     for tid, view in sorted(board.items()):
         key = f"{tid}#{view.generation}"
         if view.is_open and key not in state["seen_open"]:
-            fresh.append(tid)
             state["seen_open"].append(key)
-    return Wake("task-available", " ".join(fresh)) if fresh else None
+            return Wake("task-available", tid)
+    return None
 
 
 def _master_tick(

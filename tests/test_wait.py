@@ -78,6 +78,24 @@ class TestTick(unittest.TestCase):
         try_claim(self.hive, t, "carol", "claude-code", T0, 60)
         self.assertEqual(self.tick("bob", T0 + 120 * S), Wake("task-available", t))
 
+    def test_worker_is_offered_one_open_task_per_wake(self):
+        # max_claims_open_per_agent is 1: a wake names one task, and only that
+        # one is marked seen, so the other is offered after this one is done.
+        t1, t2 = sorted([self._task("t1"), self._task("t2")])
+        self.assertEqual(self.tick("bob"), Wake("task-available", t1))
+        try_claim(self.hive, t1, "bob", "grok", T0, 900)
+        self.assertIsNone(self.tick("bob"))
+        complete(self.hive, t1, "bob", T0, result_ref="rip-swarm/bob@abc1234")
+        self.assertEqual(self.tick("bob"), Wake("task-available", t2))
+        self.assertIsNone(self.tick("bob"))
+
+    def test_declined_offer_moves_on_to_the_next_task(self):
+        t1, t2 = sorted([self._task("t1"), self._task("t2")])
+        self.assertEqual(self.tick("bob"), Wake("task-available", t1))
+        # bob does not claim t1 (not his, or exit 2): the next wake is t2, not t1
+        self.assertEqual(self.tick("bob"), Wake("task-available", t2))
+        self.assertIsNone(self.tick("bob"))
+
     def test_worker_with_a_claim_is_not_offered_more(self):
         t1 = self._task("t1")
         self._task("t2")

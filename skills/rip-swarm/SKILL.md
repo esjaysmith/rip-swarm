@@ -43,7 +43,7 @@ python3 "$SKILL_DIR/scripts/wait.py" --hive "$HIVE" --agent "$AGENT" [--timeout 
 |--------|-------------|
 | `lease-lost` | both |
 | `message` | both |
-| `task-available` | worker |
+| `task-available <task>` (one unseen open task per wake) | worker |
 | `task-finished <task> <action>` | master |
 | `all-complete` | master |
 | `idle-board` | master |
