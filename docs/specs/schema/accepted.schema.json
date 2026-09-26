@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rip-swarm.local/schema/accepted.schema.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["task_id", "by", "at", "integration_sha", "via"],
+  "properties": {
+    "task_id": {"type": "string", "pattern": "^task_"},
+    "by": {"type": "string"},
+    "at": {"type": "string", "pattern": "Z$"},
+    "integration_sha": {"type": "string", "pattern": "^[0-9a-f]{7,64}$"},
+    "via": {"type": "array", "items": {"type": "string", "pattern": "^task_"}}
+  }
+}

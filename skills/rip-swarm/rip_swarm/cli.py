@@ -10,7 +10,9 @@ from datetime import datetime
 from pathlib import Path
 
 from rip_swarm import __version__
+from rip_swarm.acceptance import accept_task, holds_baton, master_reject
 from rip_swarm.claim import ClaimDenied, complete, heartbeat, reject, release
+from rip_swarm.fold import Holder, active_holder
 from rip_swarm.gitops import (
     DirtyHive,
     GitopsError,
@@ -110,6 +112,15 @@ def _parser() -> argparse.ArgumentParser:
         p.add_argument("--task", required=True)
         p.add_argument("--note")
 
+    acc_p = sub.add_parser(
+        "accept", parents=[common],
+        help="master: record that a completed task is merged into integration and accepted",
+    )
+    acc_p.add_argument("--task", required=True)
+    acc_p.add_argument("--integration-sha", required=True)
+    acc_p.add_argument("--via", action="append", default=[],
+                       help="accepted follow-up task that fixed --task (repeatable)")
+
     promo = sub.add_parser("promote", parents=[common], help="promote an orchestrator")
     promo.add_argument("--by")
     promo.add_argument("--reason", default="")
@@ -180,6 +191,8 @@ def _dispatch(args: argparse.Namespace) -> object:
         return _release(args, hive, now)
     if args.command == "reject":
         return _reject(args, hive, now)
+    if args.command == "accept":
+        return _accept(args, hive, now)
     profile = load_profile(hive, args.profile)
     if args.command == "claim":
         return _claim(args, hive, now, profile)
@@ -213,8 +226,18 @@ def _summary(args: argparse.Namespace, doc: dict) -> str:
         return f"{verb} {args.task} as {args.agent} until {until}"
     if cmd == "complete":
         return f"complete {args.task} as {args.agent} (result_ref {doc['result_ref']})"
-    if cmd in ("release", "reject"):
-        return f"{cmd} {args.task} as {args.agent}"
+    if cmd == "accept":
+        if doc.get("already"):
+            return f"already accepted {args.task}"
+        return f"accepted {args.task} at {doc['integration_sha']}"
+    if cmd == "release":
+        if doc.get("already"):
+            return f"already released {args.task}"
+        return f"release {args.task} as {args.agent}"
+    if cmd == "reject":
+        if doc.get("already"):
+            return f"already rejected {args.task}"
+        return f"reject {args.task} as {args.agent}"
     return json.dumps(doc, sort_keys=True)
 
 
@@ -459,8 +482,16 @@ def _reject(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     _resolve_harness(hive, agent, args.harness)
 
     def op() -> dict:
+        live = active_holder(hive, task_id, now)
+        own_claim = isinstance(live, Holder) and live.agent == agent
+        if not own_claim and holds_baton(hive, agent, now):
+            return master_reject(hive, agent=agent, task_id=task_id, note=args.note, now=now)
         return reject(hive, task_id, agent, now, args.note)
 
+    # Spec §10's allowlist is binding: neither an ordinary reject nor a master
+    # reject may publish outside claims/<T>* and store/claims.jsonl, so the
+    # broader claim-lifecycle default (store/messages.jsonl, outbox) is refused
+    # explicitly rather than inherited.
     return _run_op(
         hive,
         local=args.local,
@@ -469,6 +500,24 @@ def _reject(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
         op=op,
         agent=agent,
         now=now,
+        allow=[f"claims/{task_id}.json", f"claims/{task_id}.*.json", "store/claims.jsonl"],
+    )
+
+
+def _accept(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
+    task_id = _require(args.task, "--task")
+    agent = _require(args.agent, "--agent")
+    _resolve_harness(hive, agent, args.harness)
+
+    def op() -> dict:
+        return accept_task(
+            hive, agent=agent, task_id=task_id,
+            integration_sha=args.integration_sha, via=args.via, now=now,
+        )
+
+    return _run_op(
+        hive, local=args.local, task_id="__none__", message=f"accept {task_id}",
+        op=op, agent=agent, now=now, allow=[f"accepted/{task_id}.json"],
     )
 
 
