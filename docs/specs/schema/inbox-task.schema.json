@@ -9,6 +9,8 @@
     "title": {"type": "string"},
     "created_at": {"type": "string", "pattern": "Z$"},
     "created_by": {"type": "string"},
-    "body": {"type": ["string", "null"]}
+    "body": {"type": ["string", "null"]},
+    "after": {"type": "array", "items": {"type": "string", "pattern": "^task_"}},
+    "fixes": {"type": "string", "pattern": "^task_"}
   }
 }

@@ -398,6 +398,7 @@ Portable skill also triggers on description keywords (`lookback`, hive, claims) 
 | 2026-09-17 | **Open-ended messages:** any registered agent may message any other registered agent, `orchestrator`, or `*` at any time; holding a claim is not required. Primitive is `write_message`. Helper / CLI / SKILL procedure shipped (`scripts/message.py`). |
 | 2026-09-18 | **Final-tombstone coexistence** (v0 plan review m1): `status` flags an active claim beside a `complete`, `release` or `reject` tombstone as corrupt; an `expired` tombstone beside a fresh claim stays the normal steal path. |
 | 2026-09-25 | **Read surface (trial prep):** read helpers see only the local tree, so `sync` (fetch + fast-forward; refuses dirty/diverged) runs before `status` / `messages`. `messages --to A` reads outbox files (the message SoT) addressed to A: direct, `*`, and `orchestrator` while A holds the baton; own messages excluded; `--since` exclusive. Publishing helpers print a one-line summary; `status` shows inbox titles. |
+| 2026-09-26 | **Roles and install** (`docs/specs/2026-09-26-roles-and-install.md`): three-skill package installed with `npx skills`. `/swarm-master` and `/swarm-worker` sit on new helpers: `join`/`leave` (member files, per-agent clone under `.git/rip-swarm/`, worktrees), background `wait`, `messages --new`, `accept`, and baton-holder `reject`. Inbox `after`/`fixes` are gated on acceptance records. |
 
 ---
 

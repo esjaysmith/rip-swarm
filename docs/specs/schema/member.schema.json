@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rip-swarm.local/schema/member.schema.json",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["id", "harness", "role", "joined_at", "session"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+    "harness": {"type": "string"},
+    "role": {"const": "worker"},
+    "joined_at": {"type": "string", "pattern": "Z$"},
+    "session": {"type": "string"},
+    "left_at": {"type": "string", "pattern": "Z$"}
+  }
+}
+

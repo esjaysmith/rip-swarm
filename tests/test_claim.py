@@ -112,19 +112,17 @@ class TestClaim(unittest.TestCase):
         return [json.loads(x) for x in log.read_text(encoding="utf-8").splitlines() if x.strip()]
 
     # --- tombstone collisions -------------------------------------------------
-    def test_two_complete_cycles_at_same_now_keep_both_tombstones(self):
+    def test_two_release_cycles_at_same_now_keep_both_tombstones(self):
         tid = self.task["id"]
         try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
-        complete(self.hive, tid, "alice", T0, result_ref="r1")
+        release(self.hive, tid, "alice", T0, note="r1")
         try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
-        complete(self.hive, tid, "alice", T0, result_ref="r2")
-        done = sorted((self.hive / "claims").glob(f"{tid}.complete.*"))
+        release(self.hive, tid, "alice", T0, note="r1")
+        done = sorted((self.hive / "claims").glob(f"{tid}.release.*"))
         self.assertEqual(len(done), 2)
         names = {p.name for p in done}
-        self.assertIn(f"{tid}.complete.20260917T090100Z.json", names)
-        self.assertIn(f"{tid}.complete.20260917T090100Z-2.json", names)
-        refs = sorted(read_json(p)["result_ref"] for p in done)
-        self.assertEqual(refs, ["r1", "r2"])
+        self.assertIn(f"{tid}.release.20260917T090100Z.json", names)
+        self.assertIn(f"{tid}.release.20260917T090100Z-2.json", names)
 
     def test_tombstone_collision_third_gets_dash_3(self):
         claims = self.hive / "claims"

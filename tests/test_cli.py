@@ -354,14 +354,14 @@ class TestCli(unittest.TestCase):
         self.assertIn("inbox/", shown)
 
     def test_skill_md_name_and_scripts_shim(self):
-        text = (ROOT / "SKILL.md").read_text(encoding="utf-8")
+        text = (ROOT / "skills" / "rip-swarm" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("name: rip-swarm", text)
         self.assertNotIn("PYTHONPATH=.", text)
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
         other = Path(self.tmp.name) / "elsewhere"
         other.mkdir()
         help_run = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "status.py"), "-h"],
+            [sys.executable, str(ROOT / "skills" / "rip-swarm" / "scripts" / "status.py"), "-h"],
             cwd=str(other),
             env=env,
             capture_output=True,
@@ -370,7 +370,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(help_run.returncode, 0)
         self.assertIn("--hive", help_run.stdout)
         claim_help = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "claim.py"), "--help"],
+            [sys.executable, str(ROOT / "skills" / "rip-swarm" / "scripts" / "claim.py"), "--help"],
             cwd=str(other),
             env=env,
             capture_output=True,
@@ -379,7 +379,7 @@ class TestCli(unittest.TestCase):
         self.assertEqual(claim_help.returncode, 0)
         self.assertIn("--task", claim_help.stdout)
         hb_help = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "claim.py"), "heartbeat", "-h"],
+            [sys.executable, str(ROOT / "skills" / "rip-swarm" / "scripts" / "claim.py"), "heartbeat", "-h"],
             cwd=str(other),
             env=env,
             capture_output=True,
@@ -387,7 +387,7 @@ class TestCli(unittest.TestCase):
         )
         self.assertEqual(hb_help.returncode, 0)
         complete_help = subprocess.run(
-            [sys.executable, str(ROOT / "scripts" / "claim.py"), "complete", "-h"],
+            [sys.executable, str(ROOT / "skills" / "rip-swarm" / "scripts" / "claim.py"), "complete", "-h"],
             cwd=str(other),
             env=env,
             capture_output=True,
@@ -510,7 +510,7 @@ class TestCli(unittest.TestCase):
             encoding="utf-8",
         )
         subprocess.check_call(["git", "-C", str(self.hive), "add", "-A"], stdout=subprocess.DEVNULL)
-        subprocess.check_call(["git", "-C", str(self.hive), "commit", "-qm", "operators"])
+        subprocess.check_call(["git", "-C", str(self.hive), "commit", "--allow-empty", "-qm", "operators"])
         subprocess.check_call(
             ["git", "-C", str(self.hive), "push", "-q", "origin", "swarm"],
             stdout=subprocess.DEVNULL,
