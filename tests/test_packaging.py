@@ -181,6 +181,21 @@ class TestPackaging(unittest.TestCase):
         self.assertIn("DIRTY", block)
         self.assertRegex(block, r'switch rip-swarm/integration &&\s*\\?\s*git -C "\$WORKTREE" merge --ff-only')
 
+    def test_worker_commits_stage_everything_first(self):
+        # A bare commit leaves untracked and unstaged work out of the result,
+        # and `complete` would then record the pre-task sha.
+        text = self._text("swarm-worker")
+        commits = re.findall(r'git -C "\$WORKTREE" commit\b[^`\n]*', text)
+        self.assertGreaterEqual(len(commits), 3, commits)
+        for line in text.splitlines():
+            for match in re.finditer(r'git -C "\$WORKTREE" commit\b', line):
+                prefix = line[:match.end()]
+                self.assertRegex(prefix, r'git -C "\$WORKTREE" add -A && git -C "\$WORKTREE" commit$',
+                                 f"commit without add -A: {line}")
+        self.assertIn('git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit -m "<id>: <headline>"', text)
+        # A merge resolution never opens an editor.
+        self.assertIn('git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit --no-edit', text)
+
     def test_worker_merges_integration_only_when_it_exists(self):
         text = self._text("swarm-worker")
         self.assertIn('show-ref --verify --quiet refs/heads/rip-swarm/integration', text)

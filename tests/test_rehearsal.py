@@ -78,9 +78,10 @@ class Session:
         return sync_, build, kept
 
     def work(self, name, text, msg):
-        (self.wt / name).write_text(text, encoding="utf-8")
-        git(self.wt, "add", name)
-        git(self.wt, "commit", "-qm", msg)
+        """Step 2's edit, then step 4's `add -A && commit -m`, line for line."""
+        (self.wt / name).write_text(text, encoding="utf-8")                # may be untracked
+        git(self.wt, "add", "-A")
+        git(self.wt, "commit", "-q", "-m", msg)
         return git(self.wt, "rev-parse", "HEAD")
 
     def complete(self, task):
@@ -283,7 +284,7 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(self.w2.claim(r), 0)
         self.assertEqual(self.w2.start_task(sha_y)[:2], ("reset", "conflict"))
         (self.w2.wt / "t.txt").write_text("one\ntwo\n", encoding="utf-8")   # the resolution is the work
-        git(self.w2.wt, "add", "t.txt")
+        git(self.w2.wt, "add", "-A")                                       # step 1's conflict commit
         git(self.w2.wt, "commit", "-q", "--no-edit")
         self.assertEqual(git(self.w2.wt, "status", "--porcelain"), "")      # nothing left to commit
         self.w2.complete(r)

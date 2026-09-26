@@ -100,11 +100,11 @@ Every git command you run for a task is `WORKTREE=<WORKTREE>; git -C "$WORKTREE"
 
    Then the merge of `BUILD_ON` (`BUILD=`), which the block always runs when `BUILD_ON` is set:
    - `BUILD=none` (an ordinary task) or `BUILD=merged`: carry on.
-   - `BUILD=conflict`: the conflict **is the work** (a task with `fixes` set, or one whose body names a sha). `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` lists the files. Resolve them in `WORKTREE` and commit the merge. Release only if the resolution is beyond the task, with a note saying why.
+   - `BUILD=conflict`: the conflict **is the work** (a task with `fixes` set, or one whose body names a sha). `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` lists the files. Resolve them in `WORKTREE`, then stage everything and commit the merge without opening an editor: `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit --no-edit`. Release only if the resolution is beyond the task, with a note saying why.
    - An ordinary task cannot conflict here: its branch is reset onto integration rather than merged. If a merge of integration ever does stop on a conflict, handle it like `SYNC=error` above with the note `cannot merge integration: <files>`.
 2. Do the task in `WORKTREE` only, touching only what the task body allows.
 3. Heartbeat before each long step. While a step is still running, heartbeat again before half the lease has passed (15 minutes at the default 30m lease): `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT"`.
-4. If `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` shows changes, commit them on `BRANCH` (`WORKTREE=<WORKTREE>; git -C "$WORKTREE" commit …`). If it is clean, `HEAD` is already the result.
+4. If `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` shows changes (new files included), stage and commit all of them on `BRANCH`: `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit -m "<id>: <headline>"`. If it is clean, `HEAD` is already the result.
 5. Complete it:
    ```bash
    RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; WORKTREE=<WORKTREE>; python3 "$RS/scripts/claim.py" complete --hive "$HIVE" --task <id> --agent "$AGENT" --result-ref "rip-swarm/$AGENT@$(git -C "$WORKTREE" rev-parse --short HEAD)"
