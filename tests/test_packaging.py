@@ -145,6 +145,19 @@ class TestPackaging(unittest.TestCase):
     def test_worker_never_sends_its_brief(self):
         self.assertIn('--body "joined"', self._text("swarm-worker"))
 
+    def test_readme_documents_install_and_roles(self):
+        text = (REPO / "README.md").read_text(encoding="utf-8")
+        for needle in ("npx skills add esjaysmith/rip-swarm -g -a claude-code -a grok -s '*' -y",
+                       "npx skills update rip-swarm swarm-master swarm-worker -g",
+                       "/swarm-master", "/swarm-worker",
+                       "PYTHONPATH=skills/rip-swarm python3 -m unittest discover -s tests"):
+            self.assertIn(needle, text)
+
+    def test_protocol_template_names_members_and_after(self):
+        text = (SKILLS / "rip-swarm" / "templates" / "_swarm" / "PROTOCOL.md").read_text(encoding="utf-8")
+        for needle in ("agents/<id>/member.json", "accepted/<task_id>.json", "`after`", "/swarm-master"):
+            self.assertIn(needle, text)
+
 
 if __name__ == "__main__":
     unittest.main()
