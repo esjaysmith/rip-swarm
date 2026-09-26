@@ -16,8 +16,9 @@ from rip_swarm.gitops import (
     GitopsError,
     NotHiveRepo,
     assert_hive_repo,
+    can_publish,
     promote_allow,
-    publish,
+    publish_or_apply,
     sync,
     upstream,
 )
@@ -514,26 +515,15 @@ def _run_op(
     if local:
         return op()
     _require_publishable(hive)
-    captured: dict[str, dict] = {}
-
-    def wrapped() -> dict:
-        captured["doc"] = op()
-        return captured["doc"]
-
-    try:
-        return publish(
-            hive,
-            task_id=task_id,
-            op=wrapped,
-            message=message,
-            agent=agent,
-            now=now,
-            allow=allow,
-        )
-    except GitopsError as e:
-        if captured.get("doc") is not None and "nothing to commit" in str(e).lower():
-            return captured["doc"]
-        raise
+    return publish_or_apply(
+        hive,
+        task_id=task_id,
+        op=op,
+        message=message,
+        agent=agent,
+        now=now,
+        allow=allow,
+    )
 
 
 def _init_message(status: str, dest: Path) -> str:
@@ -592,12 +582,7 @@ def _gate_local_on_publishable(hive: Path) -> None:
 
 
 def _hive_can_publish(hive: Path) -> bool:
-    try:
-        assert_hive_repo(hive)
-        upstream(hive)
-    except (NotHiveRepo, GitopsError):
-        return False
-    return True
+    return can_publish(hive)
 
 
 def _require_publishable(hive: Path) -> None:

@@ -11,9 +11,11 @@ from datetime import datetime
 from pathlib import Path
 
 from rip_swarm.claim import ClaimDenied
+from rip_swarm.members import MemberExists, create_member, next_member_id
 from rip_swarm.orchestrator import promote
 from rip_swarm.policy import try_claim_with_policy
 from rip_swarm.profile import load_profile
+from rip_swarm.registry import yaml_agent_ids
 from rip_swarm.timeutil import parse_z
 
 # Isolate from the project checkout: never inherit GIT_DIR / GIT_WORK_TREE.
@@ -36,6 +38,10 @@ class DirtyHive(GitopsError):
 
 class NotHiveRepo(GitopsError):
     pass
+
+
+class MemberTaken(GitopsError):
+    """Another session published the same member id first (spec §3.2)."""
 
 
 def _git_env() -> dict[str, str]:
@@ -63,6 +69,17 @@ def _run(hive: Path, *args: str, check: bool = True) -> subprocess.CompletedProc
 
 def _out(hive: Path, *args: str) -> str:
     return _run(hive, *args).stdout.strip()
+
+
+def run_git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Raw `git <args>` with the isolated environment (no -C)."""
+    result = subprocess.run(
+        ["git", *args], check=False, capture_output=True, text=True, env=_git_env()
+    )
+    if check and result.returncode != 0:
+        detail = (result.stderr or result.stdout).strip() or f"git {' '.join(args)} failed"
+        raise GitopsError(detail)
+    return result
 
 
 def init_repo(path: Path, branch: str) -> None:
@@ -379,6 +396,14 @@ def _rebase_conflicts_claim(hive: Path, task_id: str) -> bool:
     return f"claims/{task_id}.json" in names
 
 
+def _rebase_conflicts_on(hive: Path, pattern: str) -> bool:
+    """True when the in-progress rebase is conflicted on a path matching `pattern`."""
+    result = _run(hive, "diff", "--name-only", "--diff-filter=U", "-z", check=False)
+    if result.returncode != 0:
+        return False
+    return any(_match_allow(name, (pattern,)) for name in result.stdout.split("\0") if name)
+
+
 def _push_with_retries(
     hive: Path,
     *,
@@ -386,6 +411,7 @@ def _push_with_retries(
     agent: str,
     now: datetime,
     max_attempts: int,
+    contested: str | None = None,
 ) -> None:
     for attempt in range(max_attempts):
         pushed = _run(hive, "push", check=False)
@@ -405,8 +431,11 @@ def _push_with_retries(
         rebased = _run(hive, "rebase", "@{u}", check=False)
         if rebased.returncode != 0:
             lost = _rebase_conflicts_claim(hive, task_id)
+            taken = contested is not None and _rebase_conflicts_on(hive, contested)
             _run(hive, "rebase", "--abort", check=False)
             _reset_upstream(hive)
+            if taken:
+                raise MemberTaken(f"another session published {contested} first")
             if lost:
                 # `remote` passed `_unexpired_held_by_other` above, so a foreign holder
                 # here is an *expired* one: stealable, not a lost race. The op closure has
@@ -432,6 +461,7 @@ def publish(
     now: datetime,
     max_attempts: int = 5,
     allow: Iterable[str] | None = None,
+    contested: str | None = None,
 ) -> dict:
     """Run `op` in the hive and push the resulting commit (§8.5).
 
@@ -504,6 +534,7 @@ def publish(
             agent=agent,
             now=now,
             max_attempts=max_attempts,
+            contested=contested,
         )
     except ClaimDenied:
         raise
@@ -592,3 +623,72 @@ def promote_and_publish(
         now=now,
         allow=promote_allow(agent, by),
     )
+
+
+def can_publish(hive: Path) -> bool:
+    """True when `hive` is a git work-tree root with an upstream."""
+    try:
+        assert_hive_repo(hive)
+        upstream(hive)
+    except GitopsError:
+        return False
+    return True
+
+
+def publish_or_apply(
+    hive: Path,
+    *,
+    task_id: str,
+    op: Callable[[], dict],
+    message: str,
+    agent: str | None,
+    now: datetime,
+    allow: Iterable[str] | None = None,
+) -> dict:
+    """Publish `op` when the hive has an upstream; otherwise just run it.
+
+    An op that legitimately writes nothing (an idempotent no-op) returns its doc
+    instead of failing with "nothing to commit".
+    """
+    if not can_publish(hive):
+        return op()
+    captured: dict[str, dict] = {}
+
+    def wrapped() -> dict:
+        captured["doc"] = op()
+        return captured["doc"]
+
+    try:
+        return publish(
+            hive, task_id=task_id, op=wrapped, message=message,
+            agent=agent, now=now, allow=allow,
+        )
+    except GitopsError as e:
+        if captured.get("doc") is not None and "nothing to commit" in str(e).lower():
+            return captured["doc"]
+        raise
+
+
+def register_member(
+    hive: Path, *, harness: str, now: datetime, max_attempts: int = 5
+) -> dict:
+    """Allocate the next `<short>-<n>` id and publish its member file.
+
+    The id is computed inside the op, after publish fast-forwarded the tree, so it
+    sees every member already on the remote. A session that loses the push race
+    (`MemberTaken`) or finds the id taken locally (`MemberExists`) retries.
+    """
+    for _ in range(max_attempts):
+        def op() -> dict:
+            agent_id = next_member_id(hive, harness, yaml_agent_ids(hive))
+            return create_member(hive, agent_id=agent_id, harness=harness, now=now)
+
+        try:
+            return publish(
+                hive, task_id="__none__", op=op, message="member join",
+                agent=None, now=now, allow=["agents/*/member.json"],
+                contested="agents/*/member.json",
+            )
+        except (MemberTaken, MemberExists):
+            continue
+    raise GitopsError(f"member id race lost {max_attempts} times; retry join")
