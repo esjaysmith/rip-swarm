@@ -5160,13 +5160,13 @@ In three sessions opened in `~/code/adgency`, start within a minute of each othe
 
 | Session | Type |
 |---------|------|
-| Claude Code #1 | `/swarm-master Review the ECU Pro next-step proposals in docs/explainers/202609/2026-09-24-ecupro-stand-van-zaken.html section 5 (lines 692–765), using docs/PM-LEDGER.md lines 36–54 and 83–87, docs/plans/2026-37-negative-keywords-r5/sdd/m37-r5-c/progress.md lines 30–53 and measurements/2026-09-24-ecupro-train-miss-classes.txt. One review per lever (reactive 36, proposal 37, default list 76, variants 8), one reconciliation of the lever bars against the miss waterfall, then a synthesis naming ONE next wheel turn. Reviews in English under docs/plans/2026-37-negative-keywords-r5/reviews/. No code changes, no eval runs, no account changes.` |
+| Claude Code #1 | `/swarm-master Review the ECU Pro next-step proposals in docs/explainers/202609/2026-09-24-ecupro-stand-van-zaken.html section 5 (lines 692–765), using docs/PM-LEDGER.md lines 36–54 and 83–87, docs/plans/2026-37-negative-keywords-r5/sdd/m37-r5-c/progress.md lines 30–53 and measurements/2026-09-24-ecupro-train-miss-classes.txt. One review per lever (reactive 36, proactive 37, default list 76, variants 8), one reconciliation of the lever bars against the miss waterfall, then a synthesis naming ONE next wheel turn. Reviews in English under docs/plans/2026-37-negative-keywords-r5/reviews/. No code changes, no eval runs, no account changes.` |
 | Grok Build | `/swarm-worker` |
 | Claude Code #2 | `/swarm-worker reviewer specialist, do not implement` |
 
 ## During
 
-Watch with `python3 ~/.agents/skills/rip-swarm/scripts/status.py --hive ~/code/adgency/.git/rip-swarm/hive-<any-id>` after `sync.py`, or with `git log --oneline origin/swarm`. Intervene only on a stuck state, and log every intervention.
+Watch from your own read-only clone, never from an agent's hive clone: syncing there races that agent's git operations. Once: `git clone -q --single-branch -b swarm git@github.com:esjaysmith/nr-adgency.git ~/hive-watch`. Then, whenever you look: `python3 ~/.agents/skills/rip-swarm/scripts/sync.py --hive ~/hive-watch && python3 ~/.agents/skills/rip-swarm/scripts/status.py --hive ~/hive-watch`. Intervene only on a stuck state, and log every intervention.
 
 ## Close-out
 
