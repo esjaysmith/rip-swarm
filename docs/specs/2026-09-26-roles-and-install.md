@@ -1,6 +1,6 @@
 # rip-swarm — roles and install (spec, 2026-09-26)
 
-**Status:** revision 7, folding the sixth review (§23). Dispositions: §14 for §13, §16 for §15, §18 for §17, §20 for §19, §22 for §21, and §24 for §23. Awaiting operator review. Decisions D1–D7 stand.
+**Status:** approved 2026-09-26 at revision 7 (seventh review pass found no new holes). Review history: §13, §15, §17, §19, §21, §23; dispositions §14, §16, §18, §20, §22, §24. Decisions D1–D7 stand.
 **Amends:** `docs/specs/2026-09-17-design-spec.md` (v0.2) and extends the read surface added on 2026-09-25 (`sync`, `messages`).
 **Scope:** (A) a single install/update path that reaches Claude Code and Grok Build; (B) two commands, run by the operator at any time in any harness session, that turn that session into a **master** or a **worker**.
 
