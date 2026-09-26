@@ -177,5 +177,14 @@ class TestStatus(unittest.TestCase):
         )
         self.assertEqual(r["inbox_without_claim"], [t["id"]])
 
+    def test_member_that_left_is_not_an_unknown_agent(self):
+        from rip_swarm.members import create_member, write_left
+        t = create_task(self.hive, title="T", created_by="op", now=T0)
+        create_member(self.hive, agent_id="grok-1", harness="grok", now=T0)
+        try_claim(self.hive, t["id"], "grok-1", "grok", T0, 900)
+        write_left(self.hive, "grok-1", T0)
+        r = status_report(self.hive, T0)
+        self.assertEqual(r["unknown_agents"], [])
+
 if __name__ == "__main__":
     unittest.main()

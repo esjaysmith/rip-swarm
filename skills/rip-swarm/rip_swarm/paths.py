@@ -55,6 +55,16 @@ class HivePaths:
         return self.root / "lookback"
 
     @property
+    def accepted(self) -> Path:
+        return self.root / "accepted"
+
+    def accepted_record(self, task_id: str) -> Path:
+        return self.accepted / f"{task_id}.json"
+
+    def member(self, agent_id: str) -> Path:
+        return self.agents / agent_id / "member.json"
+
+    @property
     def profiles(self) -> Path:
         return self.root / "profiles"
 

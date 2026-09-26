@@ -8,7 +8,7 @@ from pathlib import Path
 from rip_swarm.fold import Corrupt, Expired, Holder, active_holder
 from rip_swarm.orchestrator import orchestrator_state
 from rip_swarm.paths import HivePaths
-from rip_swarm.registry import load_registry
+from rip_swarm.registry import known_agents
 from rip_swarm.timeutil import format_z
 
 _ACTIVE_JSON = re.compile(r"[^.]+\.json")
@@ -17,7 +17,7 @@ _ACTIVE_JSON = re.compile(r"[^.]+\.json")
 def status_report(hive: Path, now: datetime) -> dict:
     state = orchestrator_state(hive, now)
     holders, expired_ids, claim_agents, corrupt = _scan_claims(hive, now)
-    known = {agent["id"] for agent in load_registry(hive)}
+    known = known_agents(hive)
     # The baton is reported under "orchestrator"; don't double-list it as work.
     task_holders = [rec for rec in holders if rec.task_id != "orchestrator"]
     return {
