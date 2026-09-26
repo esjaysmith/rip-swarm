@@ -128,11 +128,13 @@ class TestBoard(unittest.TestCase):
         b = out.getvalue().split()[1].rstrip(":")
         view = read_board(self.hive, T0)[b]
         self.assertEqual((view.after, view.fixes), ((a,), a))
-        self.assertEqual(
-            main(["inbox-add", "--hive", str(self.hive), "--local", "--title", "c",
-                  "--created-by", "op", "--after", MISSING]),
-            1,
-        )
+        from contextlib import redirect_stderr
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main(["inbox-add", "--hive", str(self.hive), "--local", "--title", "c",
+                       "--created-by", "op", "--after", MISSING])
+        self.assertEqual(rc, 1)
+        self.assertIn(f"unknown task {MISSING}", err.getvalue())
 
 
 if __name__ == "__main__":

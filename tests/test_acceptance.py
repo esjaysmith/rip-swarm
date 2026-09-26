@@ -3,7 +3,7 @@ import io
 import json
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
@@ -139,11 +139,13 @@ class TestAcceptance(unittest.TestCase):
             rc = main(["reject", "--hive", str(self.hive), "--local", "--agent", "alice",
                        "--task", u, "--note", "drop"])
         self.assertEqual((rc, out.getvalue()), (0, f"reject {u} as alice\n"))
-        self.assertEqual(
-            main(["reject", "--hive", str(self.hive), "--local", "--agent", "bob",
-                  "--task", self._task("v"), "--note", "x"]),
-            2,
-        )
+        v = self._task("v")
+        err = io.StringIO()
+        with redirect_stderr(err):
+            rc = main(["reject", "--hive", str(self.hive), "--local", "--agent", "bob",
+                       "--task", v, "--note", "x"])
+        self.assertEqual(rc, 2)
+        self.assertIn("no active claim", err.getvalue())
 
     def test_reject_cli_uses_an_explicit_narrow_allowlist(self):
         # Controller ruling on spec §10: the CLI `reject` publish must not fall
