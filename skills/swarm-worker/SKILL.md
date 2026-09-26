@@ -24,28 +24,28 @@ You are joining a git-backed swarm as a **worker**. Coordinate only through the 
 
 Every helper is `python3 "$RS/scripts/<name>.py" …`.
 
+**Shell variables do not survive between commands.** Claude Code and Grok start each command in a fresh shell. Every command in this skill that uses `$RS`, `$HIVE`, `$AGENT`, `$WORKTREE` or `$BRANCH` must begin with those assignments, written out as absolute values: `RS` is the directory you found in section 1, and the others are the values `join` prints. For example: `RS=/home/u/.agents/skills/rip-swarm; HIVE=/…/hive-claude-2; AGENT=claude-2; WORKTREE=/…/.worktrees/claude-2; python3 "$RS/scripts/…" …`. In the commands below, `<RS>`, `<HIVE>`, `<AGENT>` and `<WORKTREE>` stand for those values. A value a command computes (a sha, a tip) is printed by that command. Copy it into the next command; never expect it to be set.
+
 ## 2. Join
 
 Your harness name is `claude-code` in Claude Code, `grok` in Grok Build, and otherwise your product name in lowercase.
 
 ```bash
-python3 "$RS/scripts/join.py" --role worker --harness <harness>
+RS=<RS>; python3 "$RS/scripts/join.py" --role worker --harness <harness>
 ```
 
 It prints `KEY=value` lines. Keep `AGENT`, `HIVE`, `WORKTREE`, `BRANCH` and `INTEGRATION`, and use these absolute paths from now on. Tell the operator every `NOTE=` line. On exit 1, report the message and stop.
 
-**Shell variables do not survive between commands.** Claude Code and Grok start each command in a fresh shell. Every command in this skill that uses `$RS`, `$HIVE`, `$AGENT`, `$WORKTREE` or `$BRANCH` must begin with those assignments, using the absolute values `join` printed. For example: `RS=/home/u/.agents/skills/rip-swarm; HIVE=/…/hive-claude-2; AGENT=claude-2; WORKTREE=/…/.worktrees/claude-2; python3 "$RS/scripts/…" …`. A value a command computes (a sha, a tip) is printed by that command. Copy it into the next command; never expect it to be set.
-
 Say hello once, with exactly this body:
 
 ```bash
-python3 "$RS/scripts/message.py" --hive "$HIVE" --from "$AGENT" --to '*' --type note --body "joined"
+RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/message.py" --hive "$HIVE" --from "$AGENT" --to '*' --type note --body "joined"
 ```
 
 ## 3. Wait in the background, then end your turn
 
 ```bash
-python3 "$RS/scripts/wait.py" --hive "$HIVE" --agent "$AGENT"
+RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/wait.py" --hive "$HIVE" --agent "$AGENT"
 ```
 
 - **Claude Code:** run it with the Bash tool and `run_in_background: true`. When it finishes, you are invoked again. Read that task's output.
@@ -65,7 +65,16 @@ Only a line that starts with `wake ` is a wake. A harness timeout, a "moved to b
 
 ## 5. Do a claimed task
 
-1. Run `git -C "$WORKTREE" merge --no-edit rip-swarm/integration` if that branch exists. Every git command you run for a task is `git -C "$WORKTREE" …`.
+1. Merge the integration branch if it exists yet. Every git command you run for a task is `git -C "$WORKTREE" …`.
+   ```bash
+   WORKTREE=<WORKTREE>
+   if git -C "$WORKTREE" show-ref --verify --quiet refs/heads/rip-swarm/integration; then
+     git -C "$WORKTREE" merge --no-edit rip-swarm/integration && echo "SYNC=merged" || echo "SYNC=failed"
+   else
+     echo "SYNC=none"
+   fi
+   ```
+   `SYNC=merged` or `SYNC=none` (no integration branch yet, so nothing to merge): carry on. `SYNC=failed` is almost always a conflict; `git -C "$WORKTREE" status --porcelain` lists the files. Then:
    - **Ordinary task:** a conflict here is unexpected. Run `git -C "$WORKTREE" merge --abort`, then `python3 "$RS/scripts/claim.py" release --hive "$HIVE" --task <id> --agent "$AGENT" --note "cannot merge integration: <files>"`, message the orchestrator, and go back to waiting.
    - **A task with `fixes` set, or whose body names a sha to build on:** also run `git -C "$WORKTREE" merge --no-edit <sha>`. A conflict in either merge **is the work**. Resolve it in `WORKTREE` and commit the merge. Release only if the resolution is beyond the task, with a note saying why.
 2. Do the task in `WORKTREE` only, touching only what the task body allows.
@@ -80,7 +89,7 @@ Never push a project branch, merge into `rip-swarm/integration`, edit outside `W
 ## 6. Leave
 
 ```bash
-python3 "$RS/scripts/leave.py" --hive "$HIVE" --agent "$AGENT"
+RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/leave.py" --hive "$HIVE" --agent "$AGENT"
 ```
 
 ## 7. When the loop ends

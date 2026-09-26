@@ -1,5 +1,6 @@
 # tests/test_packaging.py — skills package layout (spec §2)
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -101,7 +102,7 @@ class TestPackaging(unittest.TestCase):
     def test_master_review_verifies_parents_quietly(self):
         text = self._text("swarm-master")
         self.assertIn('rev-parse -q --verify "$REVIEW^2" || true', text)
-        self.assertIn('SHA=$(git -C "$WORKTREE" rev-parse "$SHORT")', text)
+        self.assertIn('SHA=$(git -C "$WORKTREE" rev-parse -q --verify "$SHORT^{commit}")', text)
 
     def test_review_state_never_crosses_a_command(self):
         # Each harness command is a fresh shell: a fence may only read what it assigns.
@@ -110,15 +111,36 @@ class TestPackaging(unittest.TestCase):
             text = self._text(name)
             self.assertIn("fresh shell", text, name)
             for block in re.findall(r"```bash\n(.*?)```", text, re.S):
-                for var in ("REVIEW", "TIP", "SHA", "SHORT", "T", "WORKTREE"):
+                for var in ("REVIEW", "TIP", "SHA", "SHORT", "T", "WORKTREE",
+                            "RS", "HIVE", "AGENT"):
                     if re.search(rf"\${var}\b", block):
                         self.assertRegex(block, rf"(^|[\s;]){var}=", f"{name}: ${var} unassigned in\n{block}")
         master = self._text("swarm-master")
         review = next(b for b in re.findall(r"```bash\n(.*?)```", master, re.S)
                       if 'switch -c "$REVIEW"' in b)
-        for needle in ('SHA=$(git -C "$WORKTREE" rev-parse "$SHORT")', "TIP=$(",
-                       'REVIEW="rip-swarm/review-$T"', 'echo "OUTCOME='):
+        for needle in ('SHA=$(git -C "$WORKTREE" rev-parse -q --verify "$SHORT^{commit}")',
+                       "TIP=$(", 'REVIEW="rip-swarm/review-$T"', 'echo "OUTCOME=',
+                       "OUTCOME=badsha", "OUTCOME=dirty", "OUTCOME=error",
+                       'switch -c "$REVIEW" "$TIP" &&'):
             self.assertIn(needle, review)
+
+    def test_fresh_shell_rule_comes_before_the_first_command(self):
+        for name in self.ROLES:
+            text = self._text(name)
+            self.assertLess(text.index("fresh shell"), text.index("```bash"), name)
+            self.assertIn('RS=<RS>; python3 "$RS/scripts/join.py"', text, name)
+
+    def test_master_pass_block_detects_a_dirty_tree(self):
+        text = self._text("swarm-master")
+        block = next(b for b in re.findall(r"```bash\n(.*?)```", text, re.S)
+                     if "--ff-only" in b)
+        self.assertIn("status --porcelain", block)
+        self.assertIn("DIRTY", block)
+        self.assertRegex(block, r'switch rip-swarm/integration &&\s*\\?\s*git -C "\$WORKTREE" merge --ff-only')
+
+    def test_worker_merges_integration_only_when_it_exists(self):
+        text = self._text("swarm-worker")
+        self.assertIn('show-ref --verify --quiet refs/heads/rip-swarm/integration', text)
 
     def test_worker_never_sends_its_brief(self):
         self.assertIn('--body "joined"', self._text("swarm-worker"))
