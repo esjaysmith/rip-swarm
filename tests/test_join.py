@@ -147,7 +147,7 @@ class TestJoin(unittest.TestCase):
 
     def test_leave_removes_the_clone_even_if_tidy_raises(self):
         worker = join(self.repo, role="worker", harness="grok", now=T0)
-        with mock.patch.object(j, "_project_of", side_effect=OSError("permission denied")):
+        with mock.patch.object(j, "_tidy_worktree", side_effect=OSError("permission denied")):
             lines = leave(worker.hive, worker.agent, T0)
         self.assertIn("left as grok-1", lines)
         self.assertIn("worktree not tidied: permission denied", lines)
@@ -254,6 +254,35 @@ class TestLeave(unittest.TestCase):
             f"kept {unmerged.worktree}: rip-swarm/{unmerged.agent} is not merged into rip-swarm/integration",
             lines,
         )
+
+    def _shared_hive(self):
+        from hivekit import clone_hive
+        worker = join(self.repo, role="worker", harness="claude-code", now=T0)
+        return worker, clone_hive(self.root, self.origin, "_swarm")
+
+    def test_leave_keeps_a_hive_that_is_not_this_agents_clone(self):
+        worker, shared = self._shared_hive()
+        lines = leave(shared, worker.agent, T0)
+        self.assertIn(f"left as {worker.agent}", lines)
+        self.assertIn(f"kept {shared} (not this agent's clone)", lines)
+        self.assertNotIn("removed hive clone", lines)
+        self.assertTrue((shared / ".git").is_dir())
+
+    def test_already_left_keeps_a_foreign_hive_and_removes_the_own_clone(self):
+        worker, shared = self._shared_hive()
+        leave(shared, worker.agent, T0)
+        self.assertEqual(leave(shared, worker.agent, T0),
+                         ["already left", f"kept {shared} (not this agent's clone)"])
+        self.assertTrue(shared.is_dir())
+        self.assertEqual(leave(worker.hive, worker.agent, T0), ["already left", "removed hive clone"])
+        self.assertFalse(worker.hive.exists())
+
+    def test_leave_keeps_another_agents_clone(self):
+        mine = join(self.repo, role="worker", harness="claude-code", now=T0)
+        theirs = join(self.repo, role="worker", harness="claude-code", now=T0)
+        lines = leave(theirs.hive, mine.agent, T0)
+        self.assertIn(f"kept {theirs.hive} (not this agent's clone)", lines)
+        self.assertTrue(theirs.hive.is_dir())
 
     def test_cli_leave(self):
         worker = join(self.repo, role="worker", harness="grok", now=T0)

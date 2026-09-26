@@ -44,7 +44,9 @@ from rip_swarm.timeutil import format_z, parse_duration
 
 MASTER_MIGRATION = (
     "this hive predates the operator entry, so a master cannot be seated.\n"
-    "Publish this operator edit once from any hive clone, then re-run join:\n"
+    "Publish this operator edit once from any hive clone, then re-run join.\n"
+    "No clone at hand? Attach one from inside the project:\n"
+    "  python3 <rip-swarm skill>/scripts/init.py --hive /tmp/hive-op\n"
     "  agents/registry.yaml:   add  - id: op / harness: human / role: operator\n"
     "  profiles/default.yaml:  set  operators: [op]\n"
     "  git -C <hive> add agents/registry.yaml profiles/default.yaml\n"
@@ -199,7 +201,7 @@ def _undo(hive: Path, agent: str, now: datetime) -> str | None:
 
 def leave(hive: Path, agent: str, now: datetime) -> list[str]:
     """Release claims and baton, tombstone the member, tidy the worktree,
-    remove the clone (spec §5). Steps 2-3 failing keeps the clone so leave can
+    remove the clone if it is this agent's own (spec §5). Steps 2-3 failing keeps the clone so leave can
     be re-run; step 4 failing is a note."""
     hive = Path(hive)
     if not hive.exists():
@@ -207,8 +209,7 @@ def leave(hive: Path, agent: str, now: datetime) -> list[str]:
     if can_publish(hive):
         sync(hive)
     if has_left(hive, agent):
-        shutil.rmtree(hive, ignore_errors=True)
-        return ["already left"]
+        return ["already left", *_remove_clone(hive, agent)]
     lines: list[str] = []
     for tid, view in sorted(read_board(hive, now).items()):
         if view.claim == "live" and view.holder == agent:
@@ -234,9 +235,20 @@ def leave(hive: Path, agent: str, now: datetime) -> list[str]:
         lines += _tidy_worktree(hive, agent)
     except Exception as e:  # step 4 is best effort; never leave the clone behind
         lines.append(f"worktree not tidied: {e}")
+    return lines + _remove_clone(hive, agent)
+
+
+def _remove_clone(hive: Path, agent: str) -> list[str]:
+    """Delete `hive` only when it is this agent's own per-agent clone
+    (`<common-dir>/rip-swarm/hive-<agent>`); a shared or foreign hive is kept."""
+    try:
+        own = hive.resolve().name == f"hive-{agent}" and _project_of(hive.resolve()) is not None
+    except Exception:
+        own = False
+    if not own:
+        return [f"kept {hive} (not this agent's clone)"]
     shutil.rmtree(hive, ignore_errors=True)
-    lines.append("removed hive clone")
-    return lines
+    return ["removed hive clone"]
 
 
 def _project_of(hive: Path) -> Project | None:
