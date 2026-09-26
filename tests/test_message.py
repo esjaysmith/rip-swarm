@@ -190,7 +190,7 @@ class TestMessageSurface(unittest.TestCase):
         other = Path(self.tmp.name) / "elsewhere"
         other.mkdir()
         help_run = subprocess.run(
-            [__import__("sys").executable, str(ROOT / "scripts" / "message.py"), "-h"],
+            [__import__("sys").executable, str(ROOT / "skills" / "rip-swarm" / "scripts" / "message.py"), "-h"],
             cwd=str(other),
             env=env,
             capture_output=True,

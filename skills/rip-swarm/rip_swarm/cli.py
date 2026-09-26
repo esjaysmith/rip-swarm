@@ -9,6 +9,7 @@ from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 
+from rip_swarm import __version__
 from rip_swarm.claim import ClaimDenied, complete, heartbeat, reject, release
 from rip_swarm.gitops import (
     DirtyHive,
@@ -73,6 +74,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    sub.add_parser("version", help="print the rip-swarm version")
+
     init_p = sub.add_parser("init", help="bootstrap or attach the swarm hive")
     init_p.add_argument("--hive")
     init_p.add_argument("--force", action="store_true")
@@ -133,6 +136,8 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def _dispatch(args: argparse.Namespace) -> object:
+    if args.command == "version":
+        return f"rip-swarm {__version__}"
     if args.command == "init":
         dest = _init_dest(args.hive)
         status = init_hive(dest, force=args.force, git_init=not args.no_git)
