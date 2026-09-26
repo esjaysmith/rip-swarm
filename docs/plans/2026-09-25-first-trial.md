@@ -23,6 +23,7 @@ Watch for these; each is known and not a trial failure on its own.
 - **`refs/rip-swarm/prev/*`.** These refs are never pruned. There is one per task that needed a reset.
 - **Expiry wakes.** An unstolen expiry and the later steal each produce an `expired` wake, and tombstones are reported in file-name order. The master's handler for these is a no-op.
 - **Pending reject cascade.** While a task is still blocked on a rejected one, the master's `wait` returns on its first tick with that reject, every time, and `idle-board` and `timeout` wait until the cascade is done.
+- **Replacement titles.** A rerun of the master's reject handler finds an earlier replacement only by its title suffix ` (replaces <id>)`. A replacement titled otherwise is posted a second time.
 
 ## Success criteria
 

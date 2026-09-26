@@ -1,6 +1,7 @@
 # tests/test_rehearsal.py — model-free rehearsal: one master, two workers (spec §11)
 import io
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -190,6 +191,63 @@ class Master(Session):
         rc, out = cli("reject", "--hive", self.hive, "--agent", self.agent, "--task", task,
                       "--note", note, at=self.now)
         assert rc == 0, out
+
+    def handle_reject(self, task, wanted=()):
+        """`wake task-finished <task> reject` per /swarm-master §6, step by step.
+
+        `wanted` is the model's call: the rejected tasks whose work is still
+        wanted. The orphan is always rejected here; the other choice is `review`.
+        Every step reads the board first, so a rerun does nothing twice.
+        Returns what it did."""
+        sync(self.hive)
+        board = read_board(self.hive, self.now)
+        done = []
+        stone = next((self.hive / "claims").glob(f"{task}.reject.*.json"))
+        note = json.loads(stone.read_text(encoding="utf-8")).get("note") or ""
+        root = not re.fullmatch(r"dependency \S+ rejected", note)                 # step 1
+        x = board[task].fixes
+        if root and x and not board[x].settled and all(                           # step 2
+                view.settled for view in fixers(board, x) if view.task_id != task):
+            self.reject(x, "fix abandoned")
+            done.append(f"orphan {x}")
+        chain = self._downstream(board, task)
+        if root:                                                                   # step 3
+            replaced = {}
+            for old in [task, *chain]:
+                if old not in wanted:
+                    continue
+                found = self.replacements(old)
+                if found:
+                    replaced[old] = found[0]
+                    continue
+                after = [replaced.get(dep, dep) for dep in board[old].after
+                         if dep in replaced or dep not in (task, *chain)]
+                replaced[old] = self.post(f"{board[old].title} (replaces {old})",
+                                          *[arg for dep in after for arg in ("--after", dep)])
+                done.append(f"post {replaced[old]}")
+        for tid in chain:                                                          # step 4
+            if not board[tid].rejected:
+                self.reject(tid, f"dependency {task} rejected")
+                done.append(f"reject {tid}")
+        return done
+
+    @staticmethod
+    def _downstream(board, task):
+        """Every task whose `after` chain leads to `task`, in dependency order."""
+        out, frontier = [], [task]
+        while frontier:
+            nxt = sorted(tid for tid, v in board.items()
+                         if tid not in out and any(dep in frontier for dep in v.after))
+            out.extend(nxt)
+            frontier = nxt
+        return out
+
+    def replacements(self, task):
+        """Inbox tasks titled `… (replaces <task>)`, per the handler's grep."""
+        sync(self.hive)
+        return sorted(p.stem for p in (self.hive / "inbox").glob("task_*.json")
+                      if json.loads(p.read_text(encoding="utf-8"))["title"]
+                      .endswith(f" (replaces {task})"))
 
 
 def says(text):
@@ -458,6 +516,54 @@ class TestRehearsal(unittest.TestCase):
         self.m.reject(e, f"dependency {d} rejected")
         self.assertEqual(self.m.tick(), Wake("task-finished", f"{e} reject"))
         self.assertEqual(self.m.tick(), Wake("all-complete"))
+
+    def _chain(self):
+        t = self.m.post("T")
+        d = self.m.post("D", "--after", t)
+        e = self.m.post("E", "--after", d)
+        return t, d, e
+
+    def test_reject_handler_resumed_after_a_crash_posts_no_second_replacement(self):
+        t, d, e = self._chain()
+        self.m.reject(t, "wrong approach")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{t} reject"))
+        r = self.m.post(f"T (replaces {t})")                              # the session dies here
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{t} reject"))    # D still waits on T
+        self.m.handle_reject(t, wanted={t, d, e})
+        self.assertEqual(self.m.replacements(t), [r])
+        [d2], [e2] = self.m.replacements(d), self.m.replacements(e)
+        board = read_board(self.m.hive, T0)
+        self.assertEqual((board[d2].after, board[e2].after), ((r,), (d2,)))
+        self.assertTrue(board[d].rejected and board[e].rejected)
+        # The cascade's own tombstones wake the master; they change nothing.
+        for dep in sorted([d, e]):
+            self.assertEqual(self.m.tick(), Wake("task-finished", f"{dep} reject"))
+            self.assertEqual(self.m.handle_reject(dep, wanted={t, d, e}), [])
+        self.assertIsNone(self.m.tick())                                  # R, D2, E2 are the plan now
+        self.assertEqual(len(list((self.m.hive / "inbox").glob("task_*.json"))), 6)
+
+    def test_a_cascade_reject_posts_no_replacement_of_its_own(self):
+        t, d, e = self._chain()
+        self.m.reject(t, "not worth it")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{t} reject"))
+        self.assertEqual(self.m.handle_reject(t), [f"reject {d}", f"reject {e}"])
+        for dep in sorted([d, e]):
+            self.assertEqual(self.m.tick(), Wake("task-finished", f"{dep} reject"))
+            self.assertEqual(self.m.handle_reject(dep, wanted={d, e}), [])     # the note decides
+        self.assertEqual(self.m.replacements(d), [])
+        self.assertEqual(self.m.tick(), Wake("all-complete"))
+
+    def test_reject_handler_skips_an_orphan_already_settled(self):
+        t = self.m.post("T")
+        self.w1.tick()
+        self._done(self.w1, t, "wrong\n")
+        self.m.tick()
+        self.assertEqual(self.m.handle_complete(t, says("right\n")), "short")
+        f = self.m.post("Fix T", "--fixes", t)
+        self.m.reject(f, "not worth it")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{f} reject"))
+        self.assertEqual(self.m.handle_reject(f), [f"orphan {t}"])
+        self.assertEqual(self.m.handle_reject(f), [])                     # the wake again: X is settled
 
     def test_badsha_is_rejected_untouched(self):
         t = self.m.post("T")

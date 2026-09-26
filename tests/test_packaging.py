@@ -167,6 +167,21 @@ class TestPackaging(unittest.TestCase):
         self.assertIn("**Exit 2 from the heartbeat or from `accept.py`**", master)
         self.assertIn("does not hold a live orchestrator baton", master)
 
+    def test_master_reject_handler_is_guarded_by_the_board(self):
+        # The wake recurs, and a cascade's own tombstones wake the master too:
+        # every step must be safe to run again from the board alone.
+        text = self._text("swarm-master")
+        handler = text[text.index("### `wake task-finished <T> reject`"):text.index("### Other wakes")]
+        for needle in ("Read `note` from `<HIVE>/claims/<T>.reject.*.json`",
+                       "If it is `dependency <id> rejected`",
+                       "`<HIVE>/accepted/<X>.json`", "`<HIVE>/claims/<X>.reject.*.json`",
+                       "`<title> (replaces <T>)`", "`<its title> (replaces <id>)`",
+                       "HIVE=<HIVE>; grep -lE '\"title\": \".* \\(replaces <id>\\)\",?$' \"$HIVE\"/inbox/task_*.json",
+                       '--note "dependency <T> rejected"'):
+            self.assertIn(needle, handler)
+        # Replacements are posted before the dependents are rejected, while the wake still recurs.
+        self.assertLess(handler.index("(replaces <T>)"), handler.index('--note "dependency <T> rejected"'))
+
     def test_fresh_shell_rule_comes_before_the_first_command(self):
         for name in self.ROLES:
             text = self._text(name)
