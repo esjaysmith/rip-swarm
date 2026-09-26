@@ -63,8 +63,12 @@ def _finished_by(hive: Path, task_id: str, claim_id: str) -> bool:
 def tick(
     hive: Path, agent: str, state: dict, now: datetime, *, idle_after: int
 ) -> Wake | None:
-    """One evaluation of the local board for `agent` (no git). Records every
-    event it reports in `state`, so each event is exactly one wake (§7.2)."""
+    """One evaluation of the local board for `agent` (no git). Every event it
+    reports is recorded in `state`, so each is exactly one wake (§7.2), with one
+    exception: the master's reject-cascade wake (`_blocking_reject`) is derived
+    from the board and never recorded, so it recurs every tick until nothing
+    unsettled waits on the rejected task. Adding it to a seen set would bring
+    back the stall where a master that died mid-cascade is never woken again."""
     held = held_claims(hive, agent, now)
     live_ids = {h["claim_id"] for h in held}
     lost = [
