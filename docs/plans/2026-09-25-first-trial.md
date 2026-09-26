@@ -12,6 +12,17 @@
 4. **Leases:** background `wait` and heartbeats keep claims alive through long reads.
 5. **Friction:** every workaround is a finding.
 
+## Known limits
+
+Watch for these; each is known and not a trial failure on its own.
+
+- **Message cursor.** The cursor is `(ts, id)`. A message created earlier but pushed later than one already read can be skipped. Masters are driven by tombstones, so the board is not affected.
+- **One state file per hive clone.** Two agents pointed at the same hand-made hive clone overwrite each other's state. The role skills give each agent its own clone.
+- **Wait lock.** The lock is taken before the pid is written, so two waits started within milliseconds of each other can both run. Worst case: a duplicate wake.
+- **`wait --profile`.** `wait` ignores `--profile`: heartbeat and idle timing use the default profile, which is what `join` uses.
+- **`refs/rip-swarm/prev/*`.** These refs are never pruned. There is one per task that needed a reset.
+- **Expiry wakes.** An unstolen expiry and the later steal each produce an `expired` wake, and tombstones are reported in file-name order. The master's handler for these is a no-op.
+
 ## Success criteria
 
 | # | Criterion | Evidence |
