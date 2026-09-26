@@ -28,6 +28,7 @@ from rip_swarm.gitops import (
 from rip_swarm.inbox import create_task
 from rip_swarm.outbox import write_message
 from rip_swarm.init_hive import init_hive
+from rip_swarm.join import join, leave
 from rip_swarm.lookback import write_lookback
 from rip_swarm.messages import format_messages, list_messages, unread_messages
 from rip_swarm.orchestrator import heartbeat_orchestrator, promote, release_orchestrator
@@ -161,6 +162,13 @@ def _parser() -> argparse.ArgumentParser:
     wait_p.add_argument("--timeout", type=int, default=1800, help="idle window in seconds")
     wait_p.add_argument("--interval", type=int, default=30, help="seconds between checks")
     sub.add_parser("lookback", parents=[common], help="write a lookback report")
+
+    join_p = sub.add_parser("join", help="join the swarm as worker or master; prints KEY=value lines")
+    join_p.add_argument("--role", choices=["worker", "master"], required=True)
+    join_p.add_argument("--harness", required=True)
+    join_p.add_argument("--project", default=".")
+
+    sub.add_parser("leave", parents=[common], help="release claims, leave the swarm, tidy up")
     return parser
 
 
@@ -171,9 +179,14 @@ def _dispatch(args: argparse.Namespace) -> object:
         dest = _init_dest(args.hive)
         status = init_hive(dest, force=args.force, git_init=not args.no_git)
         return _init_message(status, dest)
+    if args.command == "join":
+        result = join(Path(args.project), role=args.role, harness=args.harness, now=now_utc())
+        return "\n".join(result.lines())
 
     hive = resolve_hive(args.hive)
     now = now_utc()
+    if args.command == "leave":
+        return "\n".join(leave(hive, _require(args.agent, "--agent"), now))
     if getattr(args, "local", False) and _hive_can_publish(hive):
         _gate_local_on_publishable(hive)
     if args.command == "status":
