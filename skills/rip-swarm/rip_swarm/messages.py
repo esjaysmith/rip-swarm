@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from rip_swarm.orchestrator import orchestrator_state
@@ -82,3 +82,26 @@ def _line(doc: dict) -> str:
         f"{doc['ts']} {doc.get('id', '?')} {doc['from']['agent']} -> {doc.get('to')} "
         f"[{doc.get('type')}] {text}"
     )
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
+
+
+def newest_cursor(hive: Path) -> list[str] | None:
+    """`[ts, id]` of the newest message in any outbox, or None."""
+    found, _ = list_messages(hive, now=_EPOCH)
+    if not found:
+        return None
+    last = found[-1]
+    return [last["ts"], last.get("id", "")]
+
+
+def unread_messages(
+    hive: Path, *, agent: str, cursor: list[str] | None, now: datetime
+) -> list[dict]:
+    """Messages addressed to `agent` that sort after `cursor` (spec §6)."""
+    found, _ = list_messages(hive, now=now, to=agent)
+    if not cursor:
+        return found
+    mark = (str(cursor[0]), str(cursor[1]))
+    return [doc for doc in found if (doc["ts"], doc.get("id", "")) > mark]

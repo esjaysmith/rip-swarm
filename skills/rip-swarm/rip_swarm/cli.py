@@ -11,6 +11,7 @@ from pathlib import Path
 
 from rip_swarm import __version__
 from rip_swarm.acceptance import accept_task, holds_baton, master_reject
+from rip_swarm.board import read_board
 from rip_swarm.claim import ClaimDenied, complete, heartbeat, reject, release
 from rip_swarm.fold import Holder, active_holder
 from rip_swarm.gitops import (
@@ -28,12 +29,13 @@ from rip_swarm.inbox import create_task
 from rip_swarm.outbox import write_message
 from rip_swarm.init_hive import init_hive
 from rip_swarm.lookback import write_lookback
-from rip_swarm.messages import format_messages, list_messages
+from rip_swarm.messages import format_messages, list_messages, unread_messages
 from rip_swarm.orchestrator import heartbeat_orchestrator, promote, release_orchestrator
 from rip_swarm.paths import resolve_hive
 from rip_swarm.policy import try_claim_with_policy
 from rip_swarm.profile import load_profile
 from rip_swarm.registry import require_agent
+from rip_swarm.state import ensure_state, mark_seen_open, save_state
 from rip_swarm.status import format_status, status_report
 from rip_swarm.timeutil import now_utc, parse_duration
 
@@ -146,6 +148,8 @@ def _parser() -> argparse.ArgumentParser:
     msgs_p.add_argument("--from", dest="from_agent")
     msgs_p.add_argument("--since", help="only messages after this UTC Z timestamp")
     msgs_p.add_argument("--type")
+    msgs_p.add_argument("--new", action="store_true",
+                        help="only messages to --to not shown before; advances its cursor")
     sub.add_parser("lookback", parents=[common], help="write a lookback report")
     return parser
 
@@ -170,6 +174,8 @@ def _dispatch(args: argparse.Namespace) -> object:
     if args.command == "sync":
         return _sync(hive)
     if args.command == "messages":
+        if args.new:
+            return _messages_new(args, hive, now)
         found, unreadable = list_messages(
             hive,
             now=now,
@@ -201,6 +207,19 @@ def _dispatch(args: argparse.Namespace) -> object:
     if args.command == "promote":
         return _promote(args, hive, now, profile)
     raise ValueError(f"unknown command: {args.command}")
+
+
+def _messages_new(args: argparse.Namespace, hive: Path, now: datetime) -> str:
+    if not args.to:
+        raise ValueError("--new requires --to")
+    if args.since or args.from_agent or args.type:
+        raise ValueError("--new cannot be combined with --since, --from or --type")
+    state, _ = ensure_state(hive, args.to)
+    found = unread_messages(hive, agent=args.to, cursor=state["messages_cursor"], now=now)
+    if found:
+        state["messages_cursor"] = [found[-1]["ts"], found[-1].get("id", "")]
+        save_state(hive, state)
+    return format_messages(found, [])
 
 
 def _sync(hive: Path) -> str:
@@ -464,7 +483,7 @@ def _release(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
         def op() -> dict:
             return release(hive, task_id, agent, now, args.note)
 
-    return _run_op(
+    doc = _run_op(
         hive,
         local=args.local,
         task_id=task_id,
@@ -473,6 +492,12 @@ def _release(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
         agent=agent,
         now=now,
     )
+    if task_id != "orchestrator":
+        view = read_board(hive, now).get(task_id)
+        if view is not None:
+            # Spec §7.3: the releaser is not re-offered the generation it just made.
+            mark_seen_open(hive, agent, f"{task_id}#{view.generation}")
+    return doc
 
 
 def _reject(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
