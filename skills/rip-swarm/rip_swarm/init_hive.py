@@ -120,7 +120,14 @@ def _attach(url: str, branch: str, dest: Path) -> None:
         raise
 
 
-def _bootstrap(url: str, branch: str, template: Path) -> None:
+def _bootstrap(
+    url: str,
+    branch: str,
+    template: Path,
+    *,
+    name: str = _FALLBACK_NAME,
+    email: str = _FALLBACK_EMAIL,
+) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         seed = Path(tmp) / "hive"
         init_repo(seed, branch)
@@ -130,9 +137,9 @@ def _bootstrap(url: str, branch: str, template: Path) -> None:
             "-C",
             str(seed),
             "-c",
-            f"user.email={_FALLBACK_EMAIL}",
+            f"user.email={email}",
             "-c",
-            f"user.name={_FALLBACK_NAME}",
+            f"user.name={name}",
             "-c",
             "commit.gpgsign=false",
             "commit",
@@ -189,3 +196,35 @@ def _git(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
         detail = (result.stderr or result.stdout).strip() or f"git {' '.join(args)} failed"
         raise GitopsError(detail)
     return result
+
+
+def bootstrap_or_attach(
+    url: str,
+    *,
+    name: str = _FALLBACK_NAME,
+    email: str = _FALLBACK_EMAIL,
+    branch: str = "swarm",
+    template: Path | None = None,
+) -> str:
+    """Create the hive branch on the remote if it does not exist (spec §4.1 step 3).
+
+    Never clones and never edits the project's .gitignore. A push that loses to
+    another session's bootstrap is an attach, not an error.
+    """
+    template = Path(template) if template is not None else _DEFAULT_TEMPLATE
+    if _branch_on_remote(url, branch):
+        return "exists"
+    try:
+        _bootstrap(url, branch, template, name=name, email=email)
+    except GitopsError:
+        if _branch_on_remote(url, branch):
+            return "exists"
+        raise
+    return "bootstrapped"
+
+
+def clone_hive(url: str, dest: Path, *, name: str, email: str, branch: str = "swarm") -> None:
+    """Single-branch clone of the hive with the agent's commit identity."""
+    _attach(url, branch, Path(dest))
+    for key, value in (("user.name", name), ("user.email", email)):
+        _git("-C", str(dest), "config", key, value)
