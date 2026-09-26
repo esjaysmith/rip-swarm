@@ -195,6 +195,26 @@ class TestJoin(unittest.TestCase):
         self.assertIn(f"agents/{worker.agent}/member.json", remote_files(self.origin))
         self.assertEqual(git(worker.hive, "config", "user.email"), FALLBACK_EMAIL)
 
+    def test_join_with_global_commit_signing_still_publishes_the_member(self):
+        # A global commit.gpgsign=true whose signing cannot work (no terminal,
+        # bogus key) must not break the hive's own commits.
+        signing = self.root / "signing-gitconfig"
+        signing.write_text(
+            "[user]\n\tname = Signer\n\temail = signer@example.com\n\tsigningkey = BOGUS\n"
+            "[commit]\n\tgpgsign = true\n[tag]\n\tgpgsign = true\n"
+            "[gpg]\n\tprogram = /nonexistent/gpg\n",
+            encoding="utf-8",
+        )
+        env = dict(os.environ, GIT_CONFIG_GLOBAL=str(signing), GIT_CONFIG_NOSYSTEM="1",
+                   GIT_TERMINAL_PROMPT="0")
+        with mock.patch.dict(os.environ, env, clear=True):
+            worker = join(self.repo, role="worker", harness="grok", now=T0)
+            master = join(self.repo, role="master", harness="claude-code", now=T0)
+        files = remote_files(self.origin)
+        self.assertIn(f"agents/{worker.agent}/member.json", files)
+        self.assertIn(f"agents/{master.agent}/member.json", files)
+        self.assertEqual(git(worker.hive, "config", "--local", "commit.gpgsign"), "false")
+
     def test_cli_join_prints_key_value_lines(self):
         out = io.StringIO()
         with redirect_stdout(out), mock.patch("rip_swarm.cli.now_utc", return_value=T0):

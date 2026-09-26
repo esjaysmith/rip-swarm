@@ -224,7 +224,15 @@ def bootstrap_or_attach(
 
 
 def clone_hive(url: str, dest: Path, *, name: str, email: str, branch: str = "swarm") -> None:
-    """Single-branch clone of the hive with the agent's commit identity."""
+    """Single-branch clone of the hive with the agent's commit identity.
+
+    Hive commits are never signed: a global commit.gpgsign=true would otherwise
+    fail every publish with no terminal to ask for a passphrase. The hive
+    creates no tags, so tag.gpgsign is left alone."""
     _attach(url, branch, Path(dest))
-    for key, value in (("user.name", name), ("user.email", email)):
+    for key, value in (
+        ("user.name", name),
+        ("user.email", email),
+        ("commit.gpgsign", "false"),
+    ):
         _git("-C", str(dest), "config", key, value)

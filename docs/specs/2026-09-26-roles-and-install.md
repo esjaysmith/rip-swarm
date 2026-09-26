@@ -150,7 +150,7 @@ Run it from anywhere inside the project work tree; `--project` defaults to the c
 ### 4.1 Steps
 
 1. **Project.** Run `git -C "$PROJECT" rev-parse --path-format=absolute --git-common-dir`, and refuse if not inside a git work tree. `MAIN` is the parent of that absolute common dir (non-bare repo). A relative print (`.git`, `../.git`) is relative to `--project`, not to the process cwd, so it is never resolved against the cwd. `--path-format` requires git ≥ 2.31. Read the `origin` URL, and refuse if `origin` is missing. Refuse if `refs/heads/rip-swarm` exists (Names, §1).
-2. **Identity for hive commits.** Use the project's effective `user.name` / `user.email`. If either is unset, fall back to the same values `init_hive._bootstrap` uses (`rip-swarm` / `rip-swarm@localhost`). Every hive commit this agent makes, bootstrap or not, uses this identity. It is set on the agent's clone.
+2. **Identity for hive commits.** Use the project's effective `user.name` / `user.email`. If either is unset, fall back to the same values `init_hive._bootstrap` uses (`rip-swarm` / `rip-swarm@localhost`). Every hive commit this agent makes, bootstrap or not, uses this identity. It is set on the agent's clone, together with `commit.gpgsign=false`: hive commits are never signed, so a global signing setup that needs a terminal or a key cannot fail a publish (§26 F4). The hive creates no tags, so `tag.gpgsign` is left alone.
 3. **Bootstrap if needed.** If `origin/swarm` does not exist, create it with the temp-dir bootstrap only (template → temp repo → push to `origin swarm`). If that push is rejected because `swarm` now exists (another session bootstrapped first), continue: that is an attach. `join` never calls `init_hive`'s clone or `.gitignore` steps and never creates `./_swarm`. Bootstrap is the only step that **creates** the branch. Every later member, claim, message and heartbeat publish pushes to that same `origin/swarm`, exactly as the v0.2 publish loop does.
 4. **Hive clone.** Clone `origin/swarm` single-branch into `<common-dir>/rip-swarm/pending-<ulid>`, and set the identity from step 2.
 5. **Preflight** (master only). If `op` is missing from the registry or from `operators`, exit 1 with the migration message (§3.3). If `claims/orchestrator.json` holds a live baton, exit 2 naming the holder and `expires_at`. In both cases remove the pending clone; no member file exists yet.
@@ -415,6 +415,7 @@ Tests are written test-first with stdlib `unittest`, using real git against temp
   - A fresh project bootstraps `origin/swarm` and seats `op`, with no `.gitignore` change and no `./_swarm`.
   - Two concurrent first joins: one bootstraps and the other attaches.
   - A machine without `user.email` still publishes the member.
+  - A machine with a global `commit.gpgsign=true` that cannot sign still publishes the member.
   - A worker's worktree is based on integration, or on `HEAD` with a `NOTE=` when there is none.
   - A master is refused while a live baton exists (exit 2).
   - A master on a pre-template hive gets exit 1 with the migration message and leaves no member behind.
