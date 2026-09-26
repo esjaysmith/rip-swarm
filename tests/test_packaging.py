@@ -166,6 +166,7 @@ class TestPackaging(unittest.TestCase):
         master = self._text("swarm-master")
         self.assertIn("**Exit 2 from the heartbeat or from `accept.py`**", master)
         self.assertIn("does not hold a live orchestrator baton", master)
+        self.assertIn("`<X> is rejected; it cannot be accepted`", master)   # ends the fixes walk only
 
     def test_master_reject_handler_is_guarded_by_the_board(self):
         # The wake recurs, and a cascade's own tombstones wake the master too:
@@ -177,9 +178,13 @@ class TestPackaging(unittest.TestCase):
                        "`<HIVE>/accepted/<X>.json`", "`<HIVE>/claims/<X>.reject.*.json`",
                        "`<title> (replaces <T>)`", "`<its title> (replaces <id>)`",
                        "HIVE=<HIVE>; grep -lE '\"title\": \".* \\(replaces <id>\\)\",?$' \"$HIVE\"/inbox/task_*.json",
-                       '--note "dependency <T> rejected"'):
+                       '--note "dependency <T> rejected"',
+                       "its `--fixes`", "leaves out `<T>`", "take the first",
+                       "If a run of this handler changes nothing"):
             self.assertIn(needle, handler)
-        # Replacements are posted before the dependents are rejected, while the wake still recurs.
+        # Replacements come first: before the dependents are rejected, while the wake
+        # still recurs, and before the orphan step, which a replacement's `--fixes` settles.
+        self.assertLess(handler.index("(replaces <T>)"), handler.index("**Orphaned original.**"))
         self.assertLess(handler.index("(replaces <T>)"), handler.index('--note "dependency <T> rejected"'))
 
     def test_fresh_shell_rule_comes_before_the_first_command(self):

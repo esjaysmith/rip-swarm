@@ -95,6 +95,14 @@ class TestAcceptance(unittest.TestCase):
             accept_task(self.hive, agent="alice", task_id=t, integration_sha=SHA, via=[f], now=T0)
         self.assertFalse(HivePaths(self.hive).accepted_record(t).exists())
 
+    def test_accept_refuses_an_unreadable_inbox_task(self):
+        t = self._task("t")
+        self._done(t)
+        HivePaths(self.hive).inbox_task(t).write_text("{not json", encoding="utf-8")
+        with self.assertRaises(ClaimDenied) as ctx:
+            accept_task(self.hive, agent="alice", task_id=t, integration_sha=SHA, now=T0)
+        self.assertEqual(str(ctx.exception), f"inbox task {t} is unreadable")
+
     def test_cli_accept_refuses_a_rejected_task(self):
         clock = mock.patch("rip_swarm.cli.now_utc", return_value=T0)
         clock.start()

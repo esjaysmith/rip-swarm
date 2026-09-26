@@ -57,7 +57,9 @@ def accept_task(
     _require_master(hive, agent, now)
     if is_accepted(hive, task_id):
         return {"task_id": task_id, "already": True}
-    view = read_board(hive, now)[task_id]
+    view = read_board(hive, now).get(task_id)
+    if view is None:                     # the board skips an inbox file it cannot parse
+        raise ClaimDenied(f"inbox task {task_id} is unreadable")
     if view.rejected:
         raise ClaimDenied(f"{task_id} is rejected; it cannot be accepted")
     if not _SHA.fullmatch(integration_sha or ""):
