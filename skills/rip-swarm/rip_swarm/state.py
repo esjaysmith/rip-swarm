@@ -5,9 +5,10 @@ import json
 import os
 from pathlib import Path
 
-from rip_swarm.board import is_accepted, list_tombstones
+from rip_swarm.board import is_accepted, list_tombstones, read_board
 from rip_swarm.io import atomic_write_json
 from rip_swarm.messages import newest_cursor
+from rip_swarm.timeutil import now_utc
 
 STATE_FILE = "rip-swarm-state.json"
 LOCK_FILE = "rip-swarm-wait.lock"
@@ -38,16 +39,28 @@ def _empty(agent: str) -> dict:
 
 
 def seed_state(hive: Path, agent: str) -> dict:
-    """Old messages and settled tombstones are seen; bare completes are not, and
-    the open board is not (spec §7.5)."""
+    """Old messages and settled tombstones are seen; bare completes are not, a
+    reject that an unsettled task still waits on (directly) is not, and the
+    open board is not (spec §7.5)."""
     state = _empty(agent)
     state["messages_cursor"] = newest_cursor(hive)
     stones = list_tombstones(hive)
     rejected = {s.task_id for s in stones if s.action == "reject"}
+    # A master that died mid-cascade left these dependents blocked: re-report
+    # their rejected dependency so the next master rejects them (§26 F3).
+    waited_on = {
+        dep
+        for view in read_board(hive, now_utc()).values()
+        if not view.settled
+        for dep in view.after
+        if dep in rejected
+    }
     for stone in stones:
         if stone.action == "complete" and not (
             is_accepted(hive, stone.task_id) or stone.task_id in rejected
         ):
+            continue
+        if stone.action == "reject" and stone.task_id in waited_on:
             continue
         state["seen_tombstones"].append(stone.name)
     return state

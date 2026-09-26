@@ -432,6 +432,19 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(wakes, sorted([f"{t} reject", f"{d} reject"]))
         self.assertEqual(self.m.tick(), Wake("all-complete"))
 
+    def test_reject_cascade_survives_a_master_change(self):
+        t = self.m.post("T")
+        d = self.m.post("D", "--after", t)
+        e = self.m.post("E", "--after", d)
+        self.m.reject(t, "not worth it")
+        self.m.reject(d, f"dependency {t} rejected")                       # master A dies here
+        b = Master(join(self.repo, role="master", harness="claude-code", now=LATER), now=LATER)
+        self.assertEqual(b.tick(), Wake("task-finished", f"{d} reject"))    # E still waits on D
+        self.assertIsNone(b.tick())
+        b.reject(e, f"dependency {d} rejected")
+        self.assertEqual(b.tick(), Wake("task-finished", f"{e} reject"))
+        self.assertEqual(b.tick(), Wake("all-complete"))
+
     def test_badsha_is_rejected_untouched(self):
         t = self.m.post("T")
         self.w1.tick()

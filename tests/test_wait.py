@@ -155,6 +155,25 @@ class TestTick(unittest.TestCase):
         self.assertEqual(self.tick("alice", T0 + 601 * S), Wake("idle-board", t))
         self.assertIsNone(self.tick("alice", T0 + 700 * S))
 
+    def test_reject_cascade_resumes_after_a_master_crash(self):
+        # T <- D <- E. The master rejects T and D, then dies before E.
+        t = self._task("t")
+        d = self._task("d", after=[t])
+        e = self._task("e", after=[d])
+        self.tick("alice")
+        master_reject(self.hive, agent="alice", task_id=t, note="drop", now=T0)
+        master_reject(self.hive, agent="alice", task_id=d, note=f"dependency {t} rejected", now=T0)
+        del self.states["alice"]                               # crash: the state is gone
+        # T's dependent D is settled, so T's reject stays seen; D's is not: E waits on it.
+        self.assertEqual(self.tick("alice"), Wake("task-finished", f"{d} reject"))
+        self.assertIsNone(self.tick("alice"))
+        self.assertIsNone(self.tick("bob"))                    # a worker is not disturbed
+        master_reject(self.hive, agent="alice", task_id=e, note=f"dependency {d} rejected", now=T0)
+        self.assertEqual(self.tick("alice"), Wake("task-finished", f"{e} reject"))
+        self.assertEqual(self.tick("alice"), Wake("all-complete"))
+        del self.states["alice"]                               # a later re-seed has nothing left
+        self.assertEqual(self.tick("alice"), Wake("all-complete"))
+
     def test_bare_complete_wakes_a_new_master_once(self):
         t = self._task("t")
         try_claim(self.hive, t, "bob", "grok", T0, 900)
