@@ -108,10 +108,18 @@ def join(
         result = _setup_role(project, hive, agent=agent, role=role, harness=harness, now=now)
         ensure_excluded(project)
         save_state(hive, seed_state(hive, agent))
-    except ClaimDenied:
+    except ClaimDenied as e:
         holder = _baton_holder(hive)
-        _undo(hive, agent, now)
-        raise ClaimDenied(f"another master holds the baton: {holder}") from None
+        denied = ClaimDenied(f"another master holds the baton: {holder}")
+        failure = _undo(hive, agent, now)
+        if failure is not None:
+            raise GitopsError(f"{denied}\n{failure}") from e
+        raise denied from None
+    except Exception as e:
+        failure = _undo(hive, agent, now)
+        if failure is not None:
+            raise GitopsError(f"{e}\n{failure}") from e
+        raise
     except BaseException:
         _undo(hive, agent, now)
         raise
@@ -176,12 +184,17 @@ def _baton_holder(hive: Path) -> str:
     return f"{doc.get('agent')} until {doc.get('expires_at')}"
 
 
-def _undo(hive: Path, agent: str, now: datetime) -> None:
-    """Same order as leave (spec §4.1 step 7): baton, member, clone."""
+def _undo(hive: Path, agent: str, now: datetime) -> str | None:
+    """Same order as leave (spec §4.1 step 7): baton, member, clone.
+
+    When leave fails, the clone is kept (it is the only place leave can be
+    re-run from) and the returned line tells the user how to finish it.
+    """
     try:
         leave(hive, agent, now)
-    except Exception:
-        shutil.rmtree(hive, ignore_errors=True)
+    except Exception as e:
+        return f"undo failed: {e}; run: leave --hive {hive} --agent {agent}"
+    return None
 
 
 def leave(hive: Path, agent: str, now: datetime) -> list[str]:
@@ -217,7 +230,10 @@ def leave(hive: Path, agent: str, now: datetime) -> list[str]:
         allow=[f"agents/{_glob_quote(agent)}/member.left.*.json"],
     )
     lines.append(f"left as {agent}")
-    lines += _tidy_worktree(hive, agent)
+    try:
+        lines += _tidy_worktree(hive, agent)
+    except Exception as e:  # step 4 is best effort; never leave the clone behind
+        lines.append(f"worktree not tidied: {e}")
     shutil.rmtree(hive, ignore_errors=True)
     lines.append("removed hive clone")
     return lines
@@ -247,5 +263,5 @@ def _tidy_worktree(hive: Path, agent: str) -> list[str]:
             return [f"kept {path}: rip-swarm/{agent} is not merged into {INTEGRATION}"]
         remove_worktree(project, path)
         return [f"removed {path}"]
-    except GitopsError as e:
+    except Exception as e:
         return [f"kept {path}: {e}"]

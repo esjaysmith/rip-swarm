@@ -118,6 +118,41 @@ class TestJoin(unittest.TestCase):
         self.assertTrue(any(p.startswith("agents/grok-1/member.left.") for p in remote_files(self.origin)))
         self.assertEqual(join(self.repo, role="master", harness="claude-code", now=T0).role, "master")
 
+    def test_failed_undo_keeps_the_clone_and_says_how_to_finish(self):
+        real = j.ensure_worktree
+
+        def fail_for_integration(project, path, branch, base):
+            if branch == "rip-swarm/integration":
+                raise GitopsError("disk full")
+            return real(project, path, branch, base)
+
+        hive = self.repo / ".git" / "rip-swarm" / "hive-grok-1"
+        with mock.patch.object(j, "ensure_worktree", side_effect=fail_for_integration), \
+                mock.patch.object(j, "leave", side_effect=GitopsError("network down")):
+            with self.assertRaises(GitopsError) as ctx:
+                join(self.repo, role="master", harness="grok", now=T0)
+        text = str(ctx.exception)
+        self.assertIn("disk full", text)
+        self.assertIn("undo failed: network down", text)
+        self.assertIn(f"leave --hive {hive} --agent grok-1", text)
+        self.assertTrue(hive.is_dir())
+        err = io.StringIO()
+        with mock.patch.object(j, "save_state", side_effect=OSError("read-only")), \
+                mock.patch.object(j, "leave", side_effect=GitopsError("network down")), \
+                redirect_stderr(err), redirect_stdout(io.StringIO()), \
+                mock.patch("rip_swarm.cli.now_utc", return_value=T0):
+            rc = main(["join", "--role", "worker", "--harness", "grok", "--project", str(self.repo)])
+        self.assertEqual(rc, 1)
+        self.assertIn("leave --hive", err.getvalue())
+
+    def test_leave_removes_the_clone_even_if_tidy_raises(self):
+        worker = join(self.repo, role="worker", harness="grok", now=T0)
+        with mock.patch.object(j, "_project_of", side_effect=OSError("permission denied")):
+            lines = leave(worker.hive, worker.agent, T0)
+        self.assertIn("left as grok-1", lines)
+        self.assertIn("worktree not tidied: permission denied", lines)
+        self.assertFalse(worker.hive.exists())
+
     def test_subdirectory_start_and_dirty_main_note(self):
         sub = self.repo / "pkg"
         sub.mkdir()
