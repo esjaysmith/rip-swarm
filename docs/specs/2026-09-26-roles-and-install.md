@@ -1,6 +1,6 @@
 # rip-swarm — roles and install (spec, 2026-09-26)
 
-**Status:** approved 2026-09-26 at revision 7 (seventh review pass found no new holes); amended by the implementation review, §25. Review history: §13, §15, §17, §19, §21, §23, §25; dispositions §14, §16, §18, §20, §22, §24, §25. Decisions D1–D7 stand.
+**Status:** approved 2026-09-26 at revision 7 (seventh review pass found no new holes); amended by the implementation review, §25, and the Grok review, §26. Review history: §13, §15, §17, §19, §21, §23, §25, §26; dispositions §14, §16, §18, §20, §22, §24, §25, §26. Decisions D1–D7 stand.
 **Amends:** `docs/specs/2026-09-17-design-spec.md` (v0.2) and extends the read surface added on 2026-09-25 (`sync`, `messages`).
 **Scope:** (A) a single install/update path that reaches Claude Code and Grok Build; (B) two commands, run by the operator at any time in any harness session, that turn that session into a **master** or a **worker**.
 
@@ -1044,3 +1044,16 @@ Whole-branch review of the implementation (`57f8d1e..3b9a3c2`). The spec was sil
 | I5. `leave` removed whatever `--hive` pointed at | Accepted. Only the agent's own `hive-<id>` clone is removed. | §5 step 5, `join.py` |
 | M7. A failed resume switch still reported `merged` | Accepted. It is `OUTCOME=error`. | §9 step 1, `/swarm-master` §6 |
 
+---
+
+## 26. Grok review and dispositions (2026-09-26)
+
+Review of the implementation at `d6e0ee2`. The operator approved F1–F4 and S1.
+
+| Finding | Disposition | Where |
+|---------|-------------|-------|
+| F1. A worker wake marked every open task seen, but a worker holds one claim, so tasks it did not claim were never offered again | Accepted. Each `task-available` wake names **one** unseen open task, the first in id order, and marks only that one seen. A declined task is thereby seen, and the next wait offers the next open task; nothing spins. | §7.2, §7.3, §8 step 3.3, `waiter._worker_tick`, `/swarm-worker` §4, `rip-swarm` SKILL |
+| F2. The worker's commit lines did not stage the work, and the conflict path named no command | Accepted. The result commit is `git add -A && git commit -m "<id>: <headline>"`; a resolved merge is `git add -A && git commit --no-edit`. The packaging test requires `add -A &&` before every worker commit. | §8 steps 3.4 and 3.6, `/swarm-worker` §5, rehearsal |
+| F3. A reject cascade stalled after a master crash or change, because seeding marked every reject seen | Accepted as the smaller fix: seeding leaves a `reject` tombstone unseen while some task that is neither accepted nor rejected names it directly in `after`. The next master is woken for it, rejects the dependents, and each further level wakes in turn. Workers ignore tombstones, so their behaviour is unchanged. | §7.2, §7.5, `state.seed_state`, `test_wait`, rehearsal |
+| F4. A global `commit.gpgsign=true` broke the member publish at join | Accepted. `clone_hive` sets `commit.gpgsign=false` on the agent's clone, as bootstrap already did per commit. The hive creates no tags, so `tag.gpgsign` is not set. | §4.1 step 2, §11, `init_hive.clone_hive`, `test_join` |
+| S1. Re-running the worker's step-1 block mid-task moved the task's commits to `refs/rip-swarm/prev` or committed conflict markers | Accepted. The block runs exactly once per task, right after the claim succeeds. The "stays only on the worker's branch" sentences now name `refs/rip-swarm/prev/...` as the other place a short-fallen sha may live. | §8 step 3.4, §9 step 3, both skills |
