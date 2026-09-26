@@ -12,6 +12,7 @@ DEFAULT_PROFILE = {
     "reviews_required_per_plan": 1,
     "orchestrator_lease_ttl": "30m",
     "worker_lease_ttl": "15m",
+    "idle_board_after": "10m",
     "allow_self_promote": False,
     "allow_preempt": False,
     "operators": [],

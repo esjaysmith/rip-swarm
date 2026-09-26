@@ -1,10 +1,11 @@
 name: default
 reviews_required_per_plan: 1
 orchestrator_lease_ttl: 30m
-worker_lease_ttl: 15m
+worker_lease_ttl: 30m
+idle_board_after: 10m
 allow_self_promote: false
 allow_preempt: false
-operators: []
+operators: [op]
 budget:
   max_claims_open_per_agent: 1
   spend_requires_operator: true

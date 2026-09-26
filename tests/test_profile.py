@@ -250,5 +250,9 @@ class TestProfile(unittest.TestCase):
         self.assertIn("claude-code", str(ctx.exception))
         self.assertFalse((self.hive / "claims" / f"{t1['id']}.json").exists())
 
+    def test_default_profile_has_idle_board_after(self):
+        from rip_swarm.profile import DEFAULT_PROFILE
+        self.assertEqual(DEFAULT_PROFILE["idle_board_after"], "10m")
+
 if __name__ == "__main__":
     unittest.main()

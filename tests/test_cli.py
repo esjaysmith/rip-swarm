@@ -510,7 +510,7 @@ class TestCli(unittest.TestCase):
             encoding="utf-8",
         )
         subprocess.check_call(["git", "-C", str(self.hive), "add", "-A"], stdout=subprocess.DEVNULL)
-        subprocess.check_call(["git", "-C", str(self.hive), "commit", "-qm", "operators"])
+        subprocess.check_call(["git", "-C", str(self.hive), "commit", "--allow-empty", "-qm", "operators"])
         subprocess.check_call(
             ["git", "-C", str(self.hive), "push", "-q", "origin", "swarm"],
             stdout=subprocess.DEVNULL,

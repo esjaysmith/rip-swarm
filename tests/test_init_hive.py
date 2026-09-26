@@ -174,6 +174,17 @@ class TestInitHive(unittest.TestCase):
         self.assertFalse((repo / "_swarm").exists())
         self.assertFalse((repo / ".gitignore").exists())
 
+    def test_template_seats_op_and_sets_trial_leases(self):
+        from rip_swarm.profile import load_profile
+        from rip_swarm.registry import require_agent
+        init_hive(self.dest, git_init=False)
+        self.assertEqual(require_agent(self.dest, "op"), {"id": "op", "harness": "human", "role": "operator"})
+        prof = load_profile(self.dest, None)
+        self.assertEqual(prof["operators"], ["op"])
+        self.assertEqual(prof["worker_lease_ttl"], "30m")
+        self.assertEqual(prof["idle_board_after"], "10m")
+        self.assertFalse(prof["allow_self_promote"])
+
 
 if __name__ == "__main__":
     unittest.main()

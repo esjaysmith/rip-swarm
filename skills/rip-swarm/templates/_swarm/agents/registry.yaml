@@ -1,1 +1,3 @@
-[]
+- id: op
+  harness: human
+  role: operator
