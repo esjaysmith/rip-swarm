@@ -93,7 +93,8 @@ class TestPackaging(unittest.TestCase):
 
     def test_role_skill_git_commands_are_pinned_to_the_worktree(self):
         import re
-        verbs = re.compile(r"\bgit (switch|merge|branch|rev-parse|show-ref|status|commit)\b")
+        verbs = re.compile(r"\bgit (switch|merge|branch|rev-parse|rev-list|show-ref|status|commit"
+                           r"|add|reset|update-ref)\b")
         for name in self.ROLES:
             for line in self._text(name).splitlines():
                 if verbs.search(line):
@@ -112,7 +113,7 @@ class TestPackaging(unittest.TestCase):
             self.assertIn("fresh shell", text, name)
             for block in re.findall(r"```bash\n(.*?)```", text, re.S):
                 for var in ("REVIEW", "TIP", "SHA", "SHORT", "T", "WORKTREE",
-                            "RS", "HIVE", "AGENT"):
+                            "RS", "HIVE", "AGENT", "BRANCH", "BUILD_ON", "KEPT"):
                     if re.search(rf"\${var}\b", block):
                         self.assertRegex(block, rf"(^|[\s;]){var}=", f"{name}: ${var} unassigned in\n{block}")
         master = self._text("swarm-master")
@@ -123,6 +124,48 @@ class TestPackaging(unittest.TestCase):
                        "OUTCOME=badsha", "OUTCOME=dirty", "OUTCOME=error",
                        'switch -c "$REVIEW" "$TIP" &&'):
             self.assertIn(needle, review)
+
+    SHELL_VARS = ("RS", "HIVE", "AGENT", "WORKTREE", "BRANCH")
+
+    def test_inline_commands_assign_what_they_read(self):
+        # An inline `…` command is a fresh shell too: `RS=` unset makes python3 exit 2,
+        # which reads like a refusal. A bare `$VAR` span names a variable; it is no command.
+        for name in self.ROLES:
+            prose = re.sub(r"```bash\n.*?```", "", self._text(name), flags=re.S)
+            for span in re.findall(r"`([^`\n]+)`", prose):
+                if re.fullmatch(r"\$\w+", span):
+                    continue
+                for var in self.SHELL_VARS:
+                    if re.search(rf"\${var}\b", span):
+                        self.assertRegex(span, rf"(^|[\s;]){var}=",
+                                         f"{name}: ${var} unassigned in `{span}`")
+
+    def test_worker_step_one_starts_from_integration(self):
+        text = self._text("swarm-worker")
+        block = next(b for b in re.findall(r"```bash\n(.*?)```", text, re.S) if "BUILD_ON" in b)
+        for needle in ('rev-list --count rip-swarm/integration..HEAD',
+                       'update-ref "$KEPT" HEAD',
+                       'reset -q --hard rip-swarm/integration',
+                       'merge --no-edit "$BUILD_ON"',
+                       'echo "SYNC=$SYNC BUILD=$BUILD KEPT=$KEPT"'):
+            self.assertIn(needle, block)
+        # The BUILD_ON merge is not gated on a failed integration merge (spec §8 step 4).
+        self.assertNotIn('"$SYNC" = failed', block)
+
+    def test_master_failed_resume_switch_is_an_error(self):
+        text = self._text("swarm-master")
+        review = next(b for b in re.findall(r"```bash\n(.*?)```", text, re.S)
+                      if 'switch -c "$REVIEW"' in b)
+        self.assertIn("RESUMED=failed", review)
+        self.assertRegex(review, r'elif \[ "\$RESUMED" = failed \]; then\s*\n\s*git -C "\$WORKTREE" switch rip-swarm/integration\s*\n\s*OUTCOME=error')
+
+    def test_role_skills_route_exit_2_mid_work(self):
+        worker = self._text("swarm-worker")
+        self.assertIn("**Exit 2 from `heartbeat` or `complete`**", worker)
+        self.assertIn("`claim expired`", worker)
+        master = self._text("swarm-master")
+        self.assertIn("**Exit 2 from the heartbeat or from `accept.py`**", master)
+        self.assertIn("does not hold a live orchestrator baton", master)
 
     def test_fresh_shell_rule_comes_before_the_first_command(self):
         for name in self.ROLES:

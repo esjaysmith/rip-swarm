@@ -54,11 +54,28 @@ class Session:
     def claim(self, task):
         return cli("claim", "--hive", self.hive, "--task", task, "--agent", self.agent, at=self.now)[0]
 
-    def merge_integration(self):
-        if run(self.wt, "merge", "--no-edit", "rip-swarm/integration").returncode == 0:
-            return True
-        git(self.wt, "merge", "--abort")
-        return False
+    def start_task(self, build_on=""):
+        """/swarm-worker §5 step 1, line for line: (SYNC, BUILD, KEPT)."""
+        wt, kept, build = self.wt, "none", "none"
+        if git(wt, "status", "--porcelain"):
+            sync_ = "dirty"                                                   # nothing touched
+        elif run(wt, "show-ref", "--verify", "--quiet", "refs/heads/rip-swarm/integration").returncode:
+            sync_ = "none"
+        elif git(wt, "rev-list", "--count", "rip-swarm/integration..HEAD") == "0":
+            sync_ = "merged" if run(wt, "merge", "--no-edit", "rip-swarm/integration").returncode == 0 else "error"
+        else:
+            kept = f"refs/rip-swarm/prev/{self.agent}/{git(wt, 'rev-parse', '--short', 'HEAD')}"
+            ok = (run(wt, "update-ref", kept, "HEAD").returncode == 0
+                  and run(wt, "reset", "-q", "--hard", "rip-swarm/integration").returncode == 0)
+            sync_ = "reset" if ok else "error"
+        if build_on and sync_ not in ("dirty", "error"):
+            if run(wt, "merge", "--no-edit", build_on).returncode == 0:
+                build = "merged"
+            elif run(wt, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
+                build = "conflict"
+            else:
+                build = "error"
+        return sync_, build, kept
 
     def work(self, name, text, msg):
         (self.wt / name).write_text(text, encoding="utf-8")
@@ -146,14 +163,18 @@ class Master(Session):
             p1 = run(wt, "rev-parse", "-q", "--verify", f"{review}^1").stdout.strip()
             p2 = run(wt, "rev-parse", "-q", "--verify", f"{review}^2").stdout.strip()
             if p1 == tip and p2 == full:
-                if git(wt, "branch", "--show-current") != review:
-                    git(wt, "switch", review)
-                resumed = True
+                if git(wt, "branch", "--show-current") == review or self._ok("switch", review):
+                    resumed = True
+                else:
+                    resumed = "failed"                                    # the resume switch failed
             else:
                 run(wt, "switch", "rip-swarm/integration")
                 run(wt, "branch", "-D", review)
-        if resumed:
+        if resumed is True:
             return "merged"
+        if resumed == "failed":
+            run(wt, "switch", "rip-swarm/integration")
+            return "error"
         if self._ok("switch", "-c", review, tip) and self._ok("merge", "--no-ff", "--no-edit", full):
             return "merged"
         if self._ok("rev-parse", "-q", "--verify", "MERGE_HEAD"):
@@ -187,7 +208,7 @@ class TestRehearsal(unittest.TestCase):
 
     def _done(self, worker, task, text):
         self.assertEqual(worker.claim(task), 0)
-        self.assertTrue(worker.merge_integration())
+        self.assertIn(worker.start_task()[0], ("merged", "reset"))
         worker.work("t.txt", text, f"work {task}")
         return worker.complete(task)
 
@@ -201,7 +222,7 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(self.w2.claim(a), 2)                       # lost: someone else holds it
         self.assertEqual(self.w2.claim(b), 2)                       # blocked
         self.assertEqual(self.w2.claim(c), 0)
-        self.assertTrue(self.w1.merge_integration())
+        self.assertEqual(self.w1.start_task(), ("merged", "none", "none"))
         self.w1.work("t.txt", "A\n", "A")
         self.w1.complete(a)
         self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} complete"))
@@ -224,7 +245,7 @@ class TestRehearsal(unittest.TestCase):
         # Mid-review, w2 claims other work and merges integration.
         self.w2.tick()
         self.assertEqual(self.w2.claim(c), 0)
-        self.assertTrue(self.w2.merge_integration())
+        self.assertEqual(self.w2.start_task()[0], "merged")
         self.assertNotEqual(run(self.w2.wt, "merge-base", "--is-ancestor", bad, "HEAD").returncode, 0)
         # Falls short: drop the review branch; the sha stays only on the worker branch.
         git(wt, "switch", "rip-swarm/integration")
@@ -234,8 +255,7 @@ class TestRehearsal(unittest.TestCase):
         f = self.m.post("Fix T", "--fixes", t, "--body", f"build on {bad}; t.txt must say right")
         self.assertEqual(self.w1.tick(), Wake("task-available", f))
         self.assertEqual(self.w1.claim(f), 0)
-        self.assertTrue(self.w1.merge_integration())
-        git(self.w1.wt, "merge", "--no-edit", bad)
+        self.assertEqual(self.w1.start_task(bad)[:2], ("reset", "merged"))   # the fixes sha, always
         self.w1.work("t.txt", "right\n", "fix T")
         self.w1.complete(f)
         self.assertEqual(self.m.tick(), Wake("task-finished", f"{f} complete"))
@@ -259,11 +279,10 @@ class TestRehearsal(unittest.TestCase):
         r = self.m.post("Rebase Y", "--fixes", y, "--body", f"merge {sha_y} onto integration")
         self.assertEqual(self.w2.tick(), Wake("task-available", r))
         self.assertEqual(self.w2.claim(r), 0)
-        self.assertNotEqual(run(self.w2.wt, "merge", "--no-edit", "rip-swarm/integration").returncode, 0)
+        self.assertEqual(self.w2.start_task(sha_y)[:2], ("reset", "conflict"))
         (self.w2.wt / "t.txt").write_text("one\ntwo\n", encoding="utf-8")   # the resolution is the work
         git(self.w2.wt, "add", "t.txt")
         git(self.w2.wt, "commit", "-q", "--no-edit")
-        git(self.w2.wt, "merge", "--no-edit", sha_y)                        # already contained
         self.assertEqual(git(self.w2.wt, "status", "--porcelain"), "")      # nothing left to commit
         self.w2.complete(r)
         self.assertEqual(self.m.tick(), Wake("task-finished", f"{r} complete"))
@@ -322,8 +341,7 @@ class TestRehearsal(unittest.TestCase):
         b, t, f, bad = self._handoff(with_fix=True)
         self.w1.now = LATER
         self.assertEqual(self.w1.claim(f), 0)
-        self.assertTrue(self.w1.merge_integration())
-        git(self.w1.wt, "merge", "--no-edit", bad)
+        self.assertEqual(self.w1.start_task(bad)[:2], ("reset", "merged"))
         self.w1.work("t.txt", "right\n", "fix T")
         self.w1.complete(f)
         return b, t, f
@@ -353,6 +371,20 @@ class TestRehearsal(unittest.TestCase):
         seen = []
         self.assertEqual(self.m.review(t, sha, lambda w: seen.append(git(w, "rev-parse", "HEAD")) or True), "pass")
         self.assertEqual(seen, [merged])                                    # no second merge
+
+    def test_failed_resume_switch_is_an_error(self):
+        t = self.m.post("T")
+        self.w1.tick()
+        sha = self._done(self.w1, t, "T\n")
+        wt, review = self.m.wt, f"rip-swarm/review-{t}"
+        git(wt, "switch", "-c", review, git(wt, "rev-parse", "rip-swarm/integration"))
+        git(wt, "merge", "--no-ff", "--no-edit", sha)                      # crash before the check
+        git(wt, "switch", "rip-swarm/integration")
+        other = Path(self.tmp.name) / "elsewhere"
+        git(self.repo, "worktree", "add", "-q", str(other), review)        # switch now refuses it
+        self.assertEqual(self.m.review_block(t, sha), "error")
+        self.assertEqual(git(wt, "branch", "--show-current"), "rip-swarm/integration")
+        self.assertFalse((self.m.hive / "accepted" / f"{t}.json").exists())
 
     def test_crash_left_review_branch_mismatched_is_recreated(self):
         t = self.m.post("T")
@@ -418,6 +450,30 @@ class TestRehearsal(unittest.TestCase):
         self.assertTrue(next((self.m.hive / "claims").glob(f"{t}.reject.*.json"), None))
         self.assertEqual(self.m.tick(), Wake("task-finished", f"{t} reject"))
         self.assertEqual(self.m.tick(), Wake("all-complete"))
+
+    def test_rejected_work_does_not_ride_into_the_next_result(self):
+        t1 = self.m.post("T1")
+        self.m.now += timedelta(milliseconds=1)
+        t2 = self.m.post("T2")
+        self.w1.tick()
+        self.assertEqual(self.w1.claim(t1), 0)
+        self.assertEqual(self.w1.start_task()[0], "merged")
+        bad = self.w1.work("bad.txt", "bad\n", "work T1")
+        self.w1.complete(t1)
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{t1} complete"))
+        self.assertEqual(self.m.handle_complete(t1, lambda wt: False), "short")   # not worth pursuing
+        self.m.reject(t1, "not worth pursuing")
+        self.assertEqual(self.w1.claim(t2), 0)                                   # same worker, next task
+        sync_, build, kept = self.w1.start_task()
+        self.assertEqual((sync_, build), ("reset", "none"))
+        self.assertEqual(git(self.w1.wt, "rev-parse", kept), bad)               # the old tip stays reachable
+        self.w1.work("good.txt", "good\n", "work T2")
+        self.w1.complete(t2)
+        self.m.tick()
+        self.assertEqual(self.m.handle_complete(
+            t2, lambda wt: (wt / "good.txt").is_file() and not (wt / "bad.txt").exists()), "pass")
+        self.assertNotEqual(run(self.repo, "merge-base", "--is-ancestor", bad,
+                                "rip-swarm/integration").returncode, 0)
 
     def test_all_complete_then_the_master_leaves(self):
         t = self.m.post("T")
