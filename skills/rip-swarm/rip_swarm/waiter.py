@@ -111,6 +111,12 @@ def _master_tick(
         if key not in state["seen_expiries"]:
             state["seen_expiries"].append(key)
             return Wake("task-finished", f"{tid} expired")
+    # Derived from the board, not a seen set: a reject that an unsettled task
+    # still waits on recurs every tick until its dependents are rejected, so a
+    # master that died mid-cascade resumes it, same state or fresh (§7.2).
+    cascade = _blocking_reject(board)
+    if cascade is not None:
+        return Wake("task-finished", f"{cascade} reject")
     if board and all(view.settled for view in board.values()):
         return Wake("all-complete")
     for tid, view in sorted(board.items()):
@@ -124,6 +130,18 @@ def _master_tick(
             state["idle_reported"].append(key)
             return Wake("idle-board", tid)
     return None
+
+
+def _blocking_reject(board: dict[str, TaskView]) -> str | None:
+    """The first rejected task (sorted) that an unsettled task lists in `after`."""
+    waited_on = {
+        dep
+        for view in board.values()
+        if not view.settled
+        for dep in view.after
+        if dep in board and board[dep].rejected
+    }
+    return min(waited_on) if waited_on else None
 
 
 def _stamp_time(stamp: str) -> datetime:

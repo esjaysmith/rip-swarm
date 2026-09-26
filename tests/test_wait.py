@@ -164,14 +164,48 @@ class TestTick(unittest.TestCase):
         master_reject(self.hive, agent="alice", task_id=t, note="drop", now=T0)
         master_reject(self.hive, agent="alice", task_id=d, note=f"dependency {t} rejected", now=T0)
         del self.states["alice"]                               # crash: the state is gone
-        # T's dependent D is settled, so T's reject stays seen; D's is not: E waits on it.
+        # The board says E still waits on rejected D: the wake is derived, not seeded.
         self.assertEqual(self.tick("alice"), Wake("task-finished", f"{d} reject"))
-        self.assertIsNone(self.tick("alice"))
+        self.assertEqual(self.tick("alice"), Wake("task-finished", f"{d} reject"))  # recurs
         self.assertIsNone(self.tick("bob"))                    # a worker is not disturbed
         master_reject(self.hive, agent="alice", task_id=e, note=f"dependency {d} rejected", now=T0)
         self.assertEqual(self.tick("alice"), Wake("task-finished", f"{e} reject"))
         self.assertEqual(self.tick("alice"), Wake("all-complete"))
         del self.states["alice"]                               # a later re-seed has nothing left
+        self.assertEqual(self.tick("alice"), Wake("all-complete"))
+
+    def test_reject_cascade_recurs_for_the_same_master(self):
+        # T <- D <- E. The same master keeps its state but dies after hearing
+        # D's reject and before rejecting E: its next wait still names D.
+        t = self._task("t")
+        d = self._task("d", after=[t])
+        e = self._task("e", after=[d])
+        self.tick("alice")
+        master_reject(self.hive, agent="alice", task_id=t, note="drop", now=T0)
+        self.assertEqual(self.tick("alice"), Wake("task-finished", f"{t} reject"))
+        master_reject(self.hive, agent="alice", task_id=d, note=f"dependency {t} rejected", now=T0)
+        self.assertEqual(self.tick("alice"), Wake("task-finished", f"{d} reject"))   # tombstone
+        save_state(self.hive, self.states.pop("alice"))        # dies; the state file is kept
+        self.states["alice"] = load_state(self.hive, "alice")
+        self.assertEqual(self.tick("alice"), Wake("task-finished", f"{d} reject"))   # derived
+        self.assertEqual(self.tick("alice"), Wake("task-finished", f"{d} reject"))
+        self.assertIsNone(self.tick("bob"))                    # a worker is not disturbed
+        master_reject(self.hive, agent="alice", task_id=e, note=f"dependency {d} rejected", now=T0)
+        self.assertEqual(self.tick("alice"), Wake("task-finished", f"{e} reject"))
+        self.assertEqual(self.tick("alice"), Wake("all-complete"))
+
+    def test_settled_rejects_do_not_recur(self):
+        # A reject nothing waits on is one wake; a rejected chain is quiet.
+        t = self._task("t")
+        u = self._task("u")                                    # unrelated, still open
+        self.tick("alice")
+        master_reject(self.hive, agent="alice", task_id=t, note="drop", now=T0)
+        self.assertEqual(self.tick("alice"), Wake("task-finished", f"{t} reject"))
+        self.assertIsNone(self.tick("alice"))
+        d = self._task("d", after=[u])
+        master_reject(self.hive, agent="alice", task_id=u, note="drop", now=T0)
+        master_reject(self.hive, agent="alice", task_id=d, note=f"dependency {u} rejected", now=T0)
+        del self.states["alice"]                               # a new master: all rejects settled
         self.assertEqual(self.tick("alice"), Wake("all-complete"))
 
     def test_bare_complete_wakes_a_new_master_once(self):
