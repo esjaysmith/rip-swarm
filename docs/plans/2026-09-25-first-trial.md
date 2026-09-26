@@ -25,6 +25,7 @@ Watch for these; each is known and not a trial failure on its own.
 - **Pending reject cascade.** While a task is still blocked on a rejected one, the master's `wait` returns on its first tick with that reject, every time, and `idle-board` and `timeout` wait until the cascade is done.
 - **Replacement titles.** A rerun of the master's reject handler finds an earlier replacement only by its title suffix ` (replaces <id>)`. A replacement titled otherwise is posted a second time.
 - **Reject with nothing waiting on it.** Its wake comes once. A master that dies before posting that reject's replacement, or before deciding its orphaned `fixes` target, is not woken for it again: check `status` after a master restart.
+- **Cascade-rejected follow-up.** A reject noted `dependency <id> rejected` runs only the cascade step. If that task also `fixes` some `X` and nothing replaces it, `X` is never decided and `all-complete` never fires. The master never posts a follow-up with `--after`, so only a hand-made plan hits this.
 
 ## Success criteria
 

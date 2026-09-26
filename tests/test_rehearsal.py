@@ -214,13 +214,16 @@ class Master(Session):
             for old in [task, *(tid for tid in chain if not board[tid].rejected)]:
                 if old not in wanted:
                     continue
-                found = self.replacements(old)
+                dead = {task, *chain}                                              # step 4 rejects these
+                found = [r for r in self.replacements(old)
+                         if not board[r].rejected and not any(
+                             dep in dead or board[dep].rejected for dep in board[r].after)]
                 if found:
-                    replaced[old] = found[0]                                       # the first
+                    replaced[old] = found[0]                                       # the first usable
                     continue
                 inbox = json.loads((self.hive / "inbox" / f"{old}.json").read_text(encoding="utf-8"))
-                after = [replaced.get(dep, dep) for dep in board[old].after
-                         if dep in replaced or dep not in (task, *chain)]
+                after = [replaced.get(dep, dep) for dep in board[old].after        # swap, then drop
+                         if dep in replaced or not (dep in dead or board[dep].rejected)]
                 extra = [arg for dep in after for arg in ("--after", dep)]
                 if inbox.get("body") is not None:
                     extra += ["--body", inbox["body"]]
@@ -572,6 +575,28 @@ class TestRehearsal(unittest.TestCase):
         for dep in sorted([d, e]):
             self.assertEqual(self.m.tick(), Wake("task-finished", f"{dep} reject"))
         self.assertIsNone(self.m.tick())                                  # no reject wake recurs
+
+    def test_a_replacement_drops_a_rejected_dependency_outside_the_chain(self):
+        t = self.m.post("T")
+        u = self.m.post("U")
+        d = self.m.post("D", "--after", t, "--after", u)
+        self.m.reject(t, "not needed")
+        self.m.reject(u, "not needed")
+        self.m.handle_reject(t, wanted={d})                               # T's wake comes first
+        [d2] = self.m.replacements(d)
+        self.assertEqual(read_board(self.m.hive, T0)[d2].after, ())
+
+    def test_a_dead_replacement_is_not_reused(self):
+        t, d, e = self._chain()
+        self.m.reject(t, "wrong approach")
+        stale = self.m.post(f"D (replaces {d})", "--after", t)            # an older run's slip
+        self.m.handle_reject(t, wanted={t, d})
+        found = self.m.replacements(d)
+        self.assertEqual(len(found), 2)
+        [fresh] = [r for r in found if r != stale]
+        self.assertEqual(read_board(self.m.hive, T0)[fresh].after, tuple(self.m.replacements(t)))
+        self.assertTrue(read_board(self.m.hive, T0)[stale].rejected)      # step 4 reached it
+        self.assertEqual(self.m.handle_reject(t, wanted={t, d}), [])      # the rerun keeps `fresh`
 
     def test_replacing_a_follow_up_keeps_fixes_and_leaves_the_original(self):
         t = self.m.post("T")

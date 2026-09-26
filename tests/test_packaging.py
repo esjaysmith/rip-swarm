@@ -179,7 +179,9 @@ class TestPackaging(unittest.TestCase):
                        "`<title> (replaces <T>)`", "`<its title> (replaces <id>)`",
                        "HIVE=<HIVE>; grep -lE '\"title\": \".* \\(replaces <id>\\)\",?$' \"$HIVE\"/inbox/task_*.json",
                        '--note "dependency <T> rejected"',
-                       "its `--fixes`", "leaves out `<T>`", "take the first",
+                       "its `--fixes`", "first swap each replaced task for its replacement, then leave out `<T>`",
+                       "Use the first file it prints whose task is not rejected",
+                       "or only such dead tasks, post a new one",
                        "If a run of this handler changes nothing"):
             self.assertIn(needle, handler)
         # Replacements come first: before the dependents are rejected, while the wake
