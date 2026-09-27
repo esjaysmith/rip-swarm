@@ -263,6 +263,28 @@ class TestNextStep(ChainCase):
         with self.assertRaisesRegex(ReviewsError, "has no verdict"):
             self.step(a)
 
+    def test_a_head_whose_result_ref_has_no_sha_is_exit_1(self):
+        """Final review T5: SHA is only a hex sha (7-64 characters after the
+        last `@`). Anything else on the head means the board was edited by
+        hand; an artifact already settled still says done."""
+        for ref in ("rip-swarm/alice", "rip-swarm/alice@main", "rip-swarm/alice@abc123",
+                    "rip-swarm/alice@" + "a" * 65, "rip-swarm/alice@ABC1234", "x@abc1234 "):
+            with self.subTest(ref=ref):
+                a = self.artifact(1)
+                now = self.later()
+                try_claim(self.hive, a, "alice", "claude-code", now, 3600)
+                complete(self.hive, a, "alice", now, ref)
+                if ref.strip().endswith("@abc1234"):                        # complete strips it
+                    self.assertEqual(self.step(a).sha, "abc1234")
+                    continue
+                with self.assertRaisesRegex(ReviewsError, "board was edited by hand"):
+                    self.step(a)
+                master_reject(self.hive, agent="master", task_id=a, note="x", now=self.later())
+                self.assertEqual(self.step(a).next, "done")
+        a = self.artifact(1)
+        self.done(a, "alice")
+        self.assertRegex(self.step(a).sha, r"^[0-9a-f]{7}$")
+
     def test_cli(self):
         a = self.artifact(2)
         rc, out, _ = cli("reviews", "--hive", self.hive, "--task", a, at=self.clock)
@@ -271,6 +293,27 @@ class TestNextStep(ChainCase):
         rc, out, err = cli("reviews", "--hive", self.hive, "--task", plain, at=self.clock)
         self.assertEqual((rc, out), (1, ""))
         self.assertIn("is not a reviewed artifact", err)
+
+    def test_inbox_add_refuses_a_chain_task_of_a_settled_artifact(self):
+        """Final review I1: a late fix or review of an accepted or rejected
+        reviewed artifact exits 1, and nothing is posted."""
+        a = self.artifact(1)
+        self.done(a, "alice")
+        self.review(a)
+        accept_task(self.hive, agent="master", task_id=a, integration_sha="abc1234",
+                    now=self.later())
+        b = self.artifact(1)
+        master_reject(self.hive, agent="master", task_id=b, note="drop", now=self.later())
+        for target, word in ((a, "accepted"), (b, "rejected")):
+            for flag in ("--fixes", "--reviews"):
+                with self.subTest(target=word, flag=flag):
+                    before = sorted((self.hive / "inbox").glob("task_*.json"))
+                    rc, out, err = cli("inbox-add", "--hive", self.hive, "--local",
+                                       "--created-by", "master", "--title", "late",
+                                       flag, target, at=self.later())
+                    self.assertEqual(rc, 1)
+                    self.assertIn(f"{target} is {word}; post a new task instead", err)
+                    self.assertEqual(sorted((self.hive / "inbox").glob("task_*.json")), before)
 
 
 class TestIndependence(ChainCase):
@@ -401,6 +444,37 @@ class TestAcceptReadiness(ChainCase):
         a = self.artifact(0)
         self.done(a, "alice")
         self.assertEqual(self.accept(a)["task_id"], a)
+
+    def test_chain_work_in_progress_blocks_the_accept(self):
+        """Final review m1: ready also means no chain task is open, claimed or
+        blocked, as when reviews.py would say merge."""
+        a = self.artifact(1)
+        self.done(a, "alice")
+        self.review(a)
+        extra = self.post("Review 2", reviews=a)                            # open
+        with self.assertRaisesRegex(ClaimDenied, f"^{a} has chain work in progress: {extra}$"):
+            self.accept(a)
+        try_claim(self.hive, extra, "bob", "grok", self.later(), 3600)       # claimed
+        with self.assertRaisesRegex(ClaimDenied, f"has chain work in progress: {extra}"):
+            self.accept(a)
+        master = self.post("Master")
+        blocked = self.post("Rebase", fixes=a, after=[master])              # blocked
+        release(self.hive, extra, "bob", self.later(), note="gave up")
+        master_reject(self.hive, agent="master", task_id=extra, note="x", now=self.later())
+        with self.assertRaisesRegex(ClaimDenied, f"has chain work in progress: {blocked}"):
+            self.accept(a)
+        master_reject(self.hive, agent="master", task_id=blocked, note="x", now=self.later())
+        self.assertEqual(self.accept(a)["task_id"], a)                      # rejected ones are settled
+
+    def test_cli_chain_work_in_progress_exits_2(self):
+        a = self.artifact(1)
+        self.done(a, "alice")
+        self.review(a)
+        extra = self.post("Review 2", reviews=a)
+        rc, _, err = cli("accept", "--hive", self.hive, "--local", "--agent", "master",
+                         "--task", a, "--integration-sha", "0123abc", at=self.later())
+        self.assertEqual(rc, 2)
+        self.assertIn(f"{a} has chain work in progress: {extra}", err)
 
 
 class TestChainCascade(ChainCase):

@@ -74,6 +74,11 @@ def accept_task(
             raise ClaimDenied(
                 f"{task_id} needs {view.min_reviews} review rounds ending clean, has {state.rounds}"
             )
+        # Ready only when reviews.py would say merge: no chain task is still
+        # open, claimed or blocked (neither completed nor rejected).
+        busy = next((v for v in state.tasks if not v.completed and not v.rejected), None)
+        if busy is not None:
+            raise ClaimDenied(f"{task_id} has chain work in progress: {busy.task_id}")
     if not _SHA.fullmatch(integration_sha or ""):
         raise ValueError(f"--integration-sha must be a hex commit id, got {integration_sha!r}")
     via = list(dict.fromkeys(via))

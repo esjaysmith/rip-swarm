@@ -60,6 +60,9 @@ def create_task(
         raise InboxError("created_by is required")
     if reviews is not None and (fixes or kind is not None or min_reviews is not None):
         raise InboxError("--reviews cannot be combined with --fixes, --min-reviews or --kind")
+    if fixes and (kind is not None or min_reviews is not None):
+        # §5.2: rebase, follow-up and review tasks get no kind and no min_reviews.
+        raise InboxError("--fixes cannot be combined with --kind or --min-reviews")
     if min_reviews is not None and not _whole(min_reviews):
         raise InboxError(f"--min-reviews must be an integer >= 0, got {min_reviews!r}")
     deps = list(dict.fromkeys(after or []))
@@ -69,6 +72,8 @@ def create_task(
             raise InboxError(f"unknown task {ref}: post it before tasks that refer to it")
     if reviews is not None and not _whole_at_least_one(read_json(HivePaths(hive).inbox_task(reviews))):
         raise InboxError(f"{reviews} is not a reviewed artifact (min_reviews >= 1)")
+    for target in [ref for ref in (fixes, reviews) if ref]:
+        _require_live_chain(hive, target)
     if kind is not None:
         known = floors or {}
         if kind not in known:
@@ -104,6 +109,25 @@ def create_task(
 
 def _whole_at_least_one(doc: dict) -> bool:
     return _whole(doc.get("min_reviews")) and doc["min_reviews"] >= 1
+
+
+def _require_live_chain(hive: Path, target: str) -> None:
+    """A fix or review of a reviewed artifact that is already accepted or
+    rejected would never be accepted: `reviews.py` says `done` for it and the
+    master acts on nothing. Refuse it when posted. A target that is not a
+    reviewed artifact keeps today's rule, so a replacement of an ordinary
+    follow-up still copies `--fixes` of a rejected original."""
+    paths = HivePaths(hive)
+    try:
+        doc = read_json(paths.inbox_task(target))
+    except (OSError, ValueError):
+        return
+    if not _whole_at_least_one(doc):
+        return
+    if paths.accepted_record(target).is_file():
+        raise InboxError(f"{target} is accepted; post a new task instead")
+    if any(paths.claims.glob(f"{target}.reject.*.json")):
+        raise InboxError(f"{target} is rejected; post a new task instead")
 
 
 def _exact_copy(hive: Path, title: str, kind: str, n: int) -> bool:

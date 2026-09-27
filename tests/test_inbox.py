@@ -148,6 +148,46 @@ class TestReviewFields(unittest.TestCase):
         with self.assertRaisesRegex(InboxError, "at least 2"):
             self.post(title="Spec", kind="spec", min_reviews=1)           # not titled as a copy
 
+    def test_a_settled_reviewed_artifact_takes_no_new_chain_task(self):
+        """Final review I1: a fix or review of an accepted or rejected reviewed
+        artifact would never be accepted (reviews.py says done), so it is
+        refused when posted."""
+        promote(self.hive, agent="alice", harness="claude-code", now=T0, lease_seconds=1800,
+                reason="m", allow_self_promote=False, operators=["op"], by="op")
+        accepted = self.post(title="Accepted spec", kind="spec")["id"]
+        path = self.hive / "accepted" / f"{accepted}.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text('{"task_id": "%s"}' % accepted, encoding="utf-8")
+        rejected = self.post(title="Rejected spec", kind="spec")["id"]
+        master_reject(self.hive, agent="alice", task_id=rejected, note="drop", now=T0)
+        live = self.post(title="Live spec", kind="spec")["id"]
+        for target, word in ((accepted, "accepted"), (rejected, "rejected")):
+            for field in ("fixes", "reviews"):
+                with self.subTest(target=word, field=field):
+                    with self.assertRaisesRegex(
+                            InboxError, f"^{target} is {word}; post a new task instead$"):
+                        self.post(title="late", **{field: target})
+        self.assertEqual(self.post(title="Review 1", reviews=live)["reviews"], live)
+        self.assertEqual(self.post(title="Revise", fixes=live)["fixes"], live)
+
+    def test_an_unreviewed_rejected_original_keeps_its_fixes(self):
+        """A replacement of an ordinary follow-up copies `--fixes` of a
+        rejected original, as today."""
+        promote(self.hive, agent="alice", harness="claude-code", now=T0, lease_seconds=1800,
+                reason="m", allow_self_promote=False, operators=["op"], by="op")
+        original = self.post(title="Plain")["id"]
+        master_reject(self.hive, agent="alice", task_id=original, note="drop", now=T0)
+        self.assertEqual(self.post(title="Follow-up", fixes=original)["fixes"], original)
+
+    def test_fixes_combines_with_no_kind_and_no_min_reviews(self):
+        """Spec §5.2: follow-ups get no kind and no min_reviews."""
+        a = self.post(kind="spec")["id"]
+        for extra in ({"kind": "spec"}, {"min_reviews": 1}, {"min_reviews": 0}):
+            with self.subTest(extra=extra):
+                with self.assertRaisesRegex(
+                        InboxError, "--fixes cannot be combined with --kind or --min-reviews"):
+                    self.post(title="Revise", fixes=a, **extra)
+
 
 if __name__ == "__main__":
     unittest.main()

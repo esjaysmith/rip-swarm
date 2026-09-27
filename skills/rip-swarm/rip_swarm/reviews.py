@@ -56,11 +56,17 @@ def _complete_doc(stones: dict[str, list[Tombstone]], task_id: str) -> dict:
     return {}
 
 
+_HEX_SHA = re.compile(r"[0-9a-f]{7,64}")
+
+
 def _short_sha(doc: dict) -> str | None:
+    """The hex sha after the last `@` of `result_ref`, or None when there is
+    none (7 to 64 lowercase hex characters, nothing else)."""
     ref = doc.get("result_ref")
-    if not isinstance(ref, str) or not ref.strip():
+    if not isinstance(ref, str):
         return None
-    return ref.rsplit("@", 1)[-1].strip()
+    sha = ref.rsplit("@", 1)[-1].strip()
+    return sha if _HEX_SHA.fullmatch(sha) else None
 
 
 @dataclass(frozen=True)
@@ -154,6 +160,12 @@ def next_step(hive: Path, board: dict[str, TaskView], task_id: str) -> Step:
 
     if art.accepted or art.rejected:
         return step("done")
+    if st.head is not None and st.head_sha is None:
+        # `complete` needs a result_ref but does not parse it; a head whose
+        # ref carries no hex sha must never reach a post as SHA=none.
+        raise ReviewsError(
+            f"{st.head.task_id} has no hex sha in its result_ref; the board was edited by hand"
+        )
     # An open review whose latest release says it could not build. Read from
     # the board, so a takeover master that never saw the wake or the message
     # still gets it (§5.4). The review stays open until the master rejects it,
