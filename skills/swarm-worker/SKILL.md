@@ -103,14 +103,18 @@ Every git command you run for a task is `WORKTREE=<WORKTREE>; git -C "$WORKTREE"
    - `BUILD=conflict`: the conflict **is the work** (a task with `fixes` set, or one whose body names a sha). `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` lists the files. Resolve them in `WORKTREE`, then stage everything and commit the merge without opening an editor: `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit --no-edit`. Release only if the resolution is beyond the task, with a note saying why.
    - An ordinary task cannot conflict here: its branch is reset onto integration rather than merged. If a merge of integration ever does stop on a conflict, handle it like `SYNC=error` above with the note `cannot merge integration: <files>`.
 2. Do the task in `WORKTREE` only, touching only what the task body allows.
-3. Heartbeat before each long step. While a step is still running, heartbeat again before half the lease has passed (15 minutes at the default 30m lease): `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT"`.
+3. Heartbeat before each long step: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT"`. Around a long edit or test run, start the heartbeat loop in the background instead, the way section 3 starts `wait`:
+   ```bash
+   RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT" --loop
+   ```
+   It reads `worker_lease_ttl` from the profile and heartbeats each time half of it is gone. Stop it with the same command, `--stop` in place of `--loop`, as soon as that step ends, and always before step 4. Its end is not a wake. If it ended with exit 2 before you stopped it, you no longer hold the claim: handle it as an exit 2 from `heartbeat` (below).
 4. If `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` shows changes (new files included), stage and commit all of them on `BRANCH`: `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit -m "<id>: <headline>"`. If it is clean, `HEAD` is already the result.
 5. Complete it:
    ```bash
    RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; WORKTREE=<WORKTREE>; python3 "$RS/scripts/claim.py" complete --hive "$HIVE" --task <id> --agent "$AGENT" --result-ref "rip-swarm/$AGENT@$(git -C "$WORKTREE" rev-parse --short HEAD)"
    ```
-6. `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/message.py" --hive "$HIVE" --from "$AGENT" --to orchestrator --type result --body "<id>: <one-line headline>"`. Use `--to '*'` if `status.py` shows no orchestrator.
-7. Go back to waiting.
+   `complete` is the handoff: the master is woken by its tombstone and reads the result from `result_ref`. Do not send a result message.
+6. Go back to waiting.
 
 **Exit 2 from `heartbeat` or `complete`** means you no longer hold the claim. The message says which:
 - `claim expired`: your lease ran out but nobody took the task. Re-run the claim once (`RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" --hive "$HIVE" --task <id> --agent "$AGENT"`). If it exits 0, re-run the heartbeat or `complete` that failed and continue.

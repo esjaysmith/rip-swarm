@@ -237,10 +237,11 @@ class Master(Session):
                 view.settled for view in fixers(board, x) if view.task_id != task):
             self.reject(x, "fix abandoned")
             done.append(f"orphan {x}")
-        for tid in chain:                                                          # step 4
-            if not board[tid].rejected:
-                self.reject(tid, f"dependency {task} rejected")
-                done.append(f"reject {tid}")
+        rc, out = cli("reject", "--hive", self.hive, "--task", task,               # step 4
+                      "--agent", self.agent, "--cascade", at=self.now)
+        assert rc == 0, out
+        done += [f"reject {line.split()[1]}" for line in out.splitlines()
+                 if line.startswith("rejected ")]
         return done
 
     @staticmethod

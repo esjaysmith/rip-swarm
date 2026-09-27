@@ -30,7 +30,15 @@ RS=<RS>; python3 "$RS/scripts/join.py" --role master --harness <claude-code|grok
 
 Keep `AGENT`, `HIVE`, `WORKTREE` (the integration worktree) and `INTEGRATION`.
 
-Your heartbeat is `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task orchestrator --agent "$AGENT"`. Run it before every merge, acceptance check and write. While a step is still running, run it again before half the lease has passed (15 minutes).
+Your heartbeat is `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task orchestrator --agent "$AGENT"`. Run it before every merge, acceptance check and write.
+
+**The heartbeat loop** keeps the baton alive through a step that can outlast half the lease: a review's merge and acceptance check. Start it as a background command, the way section 5 starts `wait`:
+
+```bash
+RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task orchestrator --agent "$AGENT" --loop
+```
+
+It reads `orchestrator_lease_ttl` from the profile and heartbeats each time half of it is gone. Stop it with the same command, `--stop` in place of `--loop`. While it runs it is your heartbeat: do not run the one-shot heartbeat, and run no hive write until you have stopped it. Its end is not a wake. Exit 3 means a loop is already running for the baton; keep that one. If it ended with exit 2 before you stopped it, the baton is gone: stop and report, as below.
 
 **Exit 2 from the heartbeat or from `accept.py`** means the baton is gone (`claim expired`, `held by <agent>`, `no active claim for orchestrator`, or `<AGENT> does not hold a live orchestrator baton`): stop and report to the operator, as for `wake lease-lost orchestrator`. Any other exit 2 from `accept.py` names what it refused; report it and stop as well, except `is rejected; it cannot be accepted` in the `fixes` walk (section 6), which only ends the walk.
 
@@ -69,7 +77,7 @@ After starting it, end your turn. Only a line that starts with `wake ` is a wake
 1. If `<HIVE>/accepted/<T>.json` exists, do nothing.
 2. If any task whose inbox file has `"fixes": "<T>"` is neither accepted nor rejected, skip: that follow-up decides `T`. `status.py` shows `(fixes <T>)` next to such tasks.
 3. Read `result_ref` (`rip-swarm/<id>@<sha>`) from `<HIVE>/claims/<T>.complete.*.json`. Below, `<sha>` is that short sha.
-4. Review it **off** the integration branch. Heartbeat first. Run this as **one** command, with your values filled into the first line. It exits 0 on every path, including after a crash, and ends with one `OUTCOME=` line:
+4. Review it **off** the integration branch. Heartbeat first, then start the heartbeat loop (section 2). Run this as **one** command, with your values filled into the first line. It exits 0 on every path, including after a crash, and ends with one `OUTCOME=` line:
    ```bash
    WORKTREE=<WORKTREE>; T=<T>; SHORT=<sha>
    REVIEW="rip-swarm/review-$T"
@@ -119,13 +127,15 @@ After starting it, end your turn. Only a line that starts with `wake ` is a wake
    echo "OUTCOME=$OUTCOME REVIEW=$REVIEW TIP=$TIP SHA=$SHA RESUMED=$RESUMED"
    ```
    Later commands take `TIP` and `SHA` from this `OUTCOME=` line. They are not set in any new shell.
+
+   **Stop the heartbeat loop** as soon as `WORKTREE` is back on `rip-swarm/integration`, and in every case before the next hive write: right after an `OUTCOME=` line other than `OUTCOME=merged`; on `OUTCOME=merged`, right after the *Passes* item 1 command prints `NEW_TIP=` or `FAILED:`, or after the *Falls short* command.
 5. **`OUTCOME=conflict`.** The block has already aborted the merge, returned `WORKTREE` to `rip-swarm/integration` and deleted the review branch.
    1. Post a rebase task: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/inbox.py" --hive "$HIVE" --created-by "$AGENT" --fixes <T> --title "Rebase <title> onto rip-swarm/integration" --body "Merge <SHA> onto rip-swarm/integration and resolve the conflict; the resolution is the work."`
    2. Message the worker.
 6. **`OUTCOME=badsha`.** The `result_ref` sha is not a commit in this repository, so there is nothing to review. The block changed nothing. Nothing can be built on it, so treat `T` as *not worth pursuing*: run `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" reject --hive "$HIVE" --task <T> --agent "$AGENT" --note "result_ref <result_ref> is not a commit"`, message the worker with the same text, and handle the reject as in `wake task-finished <T> reject` below.
 7. **`OUTCOME=dirty`.** `WORKTREE` has uncommitted changes, so the block changed nothing. If they are leftovers of your own acceptance check, remove them and run step 4 again. Otherwise report them to the operator and stop; never discard work you did not make.
 8. **`OUTCOME=error`.** A branch switch (including the switch to resume a crash-left review branch, shown as `RESUMED=failed`) or the merge failed without a conflict. The block put `WORKTREE` back on `rip-swarm/integration` where it could. Report the git output above the `OUTCOME=` line to the operator and stop; `T` stays unaccepted.
-9. **`OUTCOME=merged`.** `WORKTREE` is on `rip-swarm/review-<T>` with the result merged. Heartbeat, then run the task's acceptance check on the files under `WORKTREE`. **Leave `WORKTREE` clean afterwards:** remove every file the check created or changed, so `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` prints nothing.
+9. **`OUTCOME=merged`.** `WORKTREE` is on `rip-swarm/review-<T>` with the result merged. The heartbeat loop is running; run the task's acceptance check on the files under `WORKTREE`. **Leave `WORKTREE` clean afterwards:** remove every file the check created or changed, so `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` prints nothing.
    - **Passes:**
      1. Run as one command:
         ```bash
@@ -166,7 +176,7 @@ Run every step, in order, each time this wake arrives. Each step first checks th
 1. **Cascade rejects.** Read `note` from `<HIVE>/claims/<T>.reject.*.json`. If it is `dependency <id> rejected`, `<T>` was rejected by a cascade, and the handler of the root reject already decided about replacements. Do step 4 only.
 2. **Replacements**, if the work is still wanted. Do this before steps 3 and 4: `status.py` lists the dependents under `blocked` (`<id> waiting on <T>`, then the tasks waiting on those) only until they are rejected. Post (the section 4 command) `<T>`'s replacement as a new task titled `<title> (replaces <T>)`. Then post each dependent that is not rejected yet and is still wanted, in dependency order, titled `<its title> (replaces <id>)`. Each post keeps the old task's body and its `--fixes`, if it has one. Its `--after` starts from the old task's `after` ids: first swap each replaced task for its replacement, then leave out `<T>`, every task step 4 rejects, and any other rejected task. No post may wait on a rejected task. Before each post, look for an earlier one: `HIVE=<HIVE>; grep -lE '"title": ".* \(replaces <id>\)",?$' "$HIVE"/inbox/task_*.json`. Use the first file it prints whose task is not rejected and waits on no rejected task and on no task step 4 rejects: that task (the file name without `.json`) is the replacement. Do not post it again, and use its id in later `--after`s. If it prints nothing (exit 1), or only such dead tasks, post a new one.
 3. **Orphaned original.** Skip this step unless `<T>` has `"fixes": "<X>"`. If `<HIVE>/accepted/<X>.json` exists (accepted) or a `<HIVE>/claims/<X>.reject.*.json` exists (rejected), `<X>` is settled: skip this step. Otherwise, if no other task that fixes `<X>` is still open, claimed, blocked or awaiting acceptance, handle `<X>` now: review it (the `complete` steps above) or reject it and cascade. A replacement from step 2 fixes `<X>` too, so this step only runs when nothing replaces `<T>`.
-4. **Reject the dependents.** Reject every task that is not rejected yet and waits on `<T>`, directly or further down the `after` chain: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" reject --hive "$HIVE" --task <id> --agent "$AGENT" --note "dependency <T> rejected"`. The tasks posted in step 2 never wait on `<T>`, so this does not reach them.
+4. **Reject the dependents**, all in one publish: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" reject --hive "$HIVE" --task <T> --agent "$AGENT" --cascade`. It rejects every task that is not rejected yet and waits on `<T>`, directly or further down the `after` chain, with the note `dependency <T> rejected`. It prints one line per task: `rejected <id>`, `already rejected <id>`, or `skipped <id> held by <agent> until <expires_at>`, and `nothing waits on <T>` when there is none. The tasks posted in step 2 never wait on `<T>`, so this does not reach them. A `skipped` line means someone still holds a dependent: report those ids to the operator and stop. The wake comes back when that holder releases or its claim expires.
 
 This wake repeats, every wait, until no task that is neither accepted nor rejected lists `<T>` in `after`. A repeat means a dependent is still blocked, for example because the session died partway through: run the whole handler again. Steps 2 and 3 check the board before they act, so the rerun only adds what is missing, and the note of step 1 keeps a dependent's own reject wake from posting anything. If a run of this handler changes nothing and `status.py` still lists a task waiting on `<T>`, the wake would come straight back: report that task to the operator and stop. If a reject or a post fails, report the error to the operator and stop. Do not wait again and loop on the same wake.
 

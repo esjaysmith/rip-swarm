@@ -178,16 +178,40 @@ class TestPackaging(unittest.TestCase):
                        "`<HIVE>/accepted/<X>.json`", "`<HIVE>/claims/<X>.reject.*.json`",
                        "`<title> (replaces <T>)`", "`<its title> (replaces <id>)`",
                        "HIVE=<HIVE>; grep -lE '\"title\": \".* \\(replaces <id>\\)\",?$' \"$HIVE\"/inbox/task_*.json",
-                       '--note "dependency <T> rejected"',
                        "its `--fixes`", "first swap each replaced task for its replacement, then leave out `<T>`",
                        "Use the first file it prints whose task is not rejected",
                        "or only such dead tasks, post a new one",
-                       "If a run of this handler changes nothing"):
+                       "If a run of this handler changes nothing",
+                       '--task <T> --agent "$AGENT" --cascade',
+                       "`skipped <id> held by <agent> until <expires_at>`"):
             self.assertIn(needle, handler)
         # Replacements come first: before the dependents are rejected, while the wake
         # still recurs, and before the orphan step, which a replacement's `--fixes` settles.
         self.assertLess(handler.index("(replaces <T>)"), handler.index("**Orphaned original.**"))
-        self.assertLess(handler.index("(replaces <T>)"), handler.index('--note "dependency <T> rejected"'))
+        self.assertLess(handler.index("(replaces <T>)"), handler.index("--cascade"))
+
+    def test_heartbeat_loop_replaces_the_fifteen_minutes(self):
+        # Execution proposals §3: the lease comes from the profile, not the prose.
+        for name, task in (("swarm-master", "orchestrator"), ("swarm-worker", "<id>")):
+            text = self._text(name)
+            self.assertNotIn("15 minutes", text, name)
+            self.assertIn(f'heartbeat --hive "$HIVE" --task {task} --agent "$AGENT" --loop', text, name)
+            self.assertIn("`--stop` in place of `--loop`", text, name)
+            self.assertIn("Its end is not a wake.", text, name)
+        master = self._text("swarm-master")
+        self.assertIn("Stop the heartbeat loop", master)
+        self.assertLess(master.index("start the heartbeat loop"), master.index("OUTCOME=$OUTCOME"))
+
+    def test_complete_is_the_handoff(self):
+        # Execution proposals §4: no result message after complete.
+        worker = self._text("swarm-worker")
+        self.assertNotIn("--type result", worker)
+        self.assertIn("`complete` is the handoff", worker)
+
+    def test_reference_names_the_new_flags(self):
+        ref = (SKILLS / "rip-swarm" / "SKILL.md").read_text(encoding="utf-8")
+        for needle in ("--cascade", "--loop", "--stop"):
+            self.assertIn(needle, ref)
 
     def test_fresh_shell_rule_comes_before_the_first_command(self):
         for name in self.ROLES:

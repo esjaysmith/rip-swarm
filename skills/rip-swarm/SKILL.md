@@ -68,8 +68,10 @@ python3 "$SKILL_DIR/scripts/message.py" --hive "$HIVE" --from "$AGENT" --to AGEN
 python3 "$SKILL_DIR/scripts/inbox.py" --hive "$HIVE" --created-by "$AGENT" --title "…" --body "…" [--after ID]… [--fixes ID]
 python3 "$SKILL_DIR/scripts/claim.py" --hive "$HIVE" --task ID --agent "$AGENT"
 python3 "$SKILL_DIR/scripts/claim.py" heartbeat --hive "$HIVE" --task ID --agent "$AGENT"
+python3 "$SKILL_DIR/scripts/claim.py" heartbeat --hive "$HIVE" --task ID --agent "$AGENT" --loop|--stop
 python3 "$SKILL_DIR/scripts/claim.py" complete --hive "$HIVE" --task ID --agent "$AGENT" --result-ref "rip-swarm/$AGENT@SHA"
 python3 "$SKILL_DIR/scripts/claim.py" release|reject --hive "$HIVE" --task ID --agent "$AGENT" --note "why"
+python3 "$SKILL_DIR/scripts/claim.py" reject --hive "$HIVE" --task ID --agent "$AGENT" --cascade
 python3 "$SKILL_DIR/scripts/accept.py" --hive "$HIVE" --agent "$AGENT" --task ID --integration-sha SHA [--via ID]
 ```
 
@@ -79,8 +81,9 @@ Rules for tasks and claims:
 - `--fixes` links a follow-up or rebase task to the task it repairs.
 - `claim` exits 2 when the task is not yours: held by someone else, blocked, completed, rejected or accepted. If the message says *retry*, re-run the claim once.
 - Do not edit the project until `claim` prints `claimed … until …`.
-- Heartbeat at or before half the lease.
+- Heartbeat at or before half the lease. `heartbeat --loop` does it for you while you work outside `wait`: it reads the lease from the profile, heartbeats each time half of it is gone, and runs until `heartbeat --stop` for the same task. A second loop for the same task exits 3. The loop exits 2 when the lease is gone.
 - `reject` by the baton holder drops a task that has no live claim. Workers may reject only what they hold.
+- `reject --cascade` (baton holder, once `ID` is rejected) rejects every task that waits on `ID` through `after`, directly or further down, in one publish, with the note `dependency ID rejected`. It prints `rejected <id>`, `already rejected <id>` or `skipped <id> held by <agent> until <time>` per task. It refuses `--note`.
 - `accept` is master-only and idempotent: a second call prints `already accepted`. It refuses a rejected task with exit 2.
 
 ## Promote, lookback
