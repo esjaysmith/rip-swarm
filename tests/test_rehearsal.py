@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from hivekit import T0, git, make_project, remote_show
-from rip_swarm.board import fixers, read_board
+from rip_swarm.board import artifact_of, chain, downstream, fixers, posting_order, read_board
 from rip_swarm.cli import main
 from rip_swarm.gitops import sync
 from rip_swarm.join import join, leave
@@ -47,10 +47,21 @@ class Session:
         return wake
 
     def post(self, title, *extra):
+        # Real posts and messages are seconds apart. On a frozen clock they would
+        # share the ULID's millisecond, and its random part would pick the order:
+        # the chain's posting order (created_at, then id: §5.3), or whether a
+        # message sorts after the reader's cursor. So each one moves the clock.
+        self.now += timedelta(milliseconds=1)
         rc, out = cli("inbox-add", "--hive", self.hive, "--created-by", self.agent,
                       "--title", title, *extra, at=self.now)
         assert rc == 0, out
         return out.split()[1].rstrip(":")
+
+    def send(self, to, body):
+        self.now += timedelta(milliseconds=1)                                      # see `post`
+        rc, out = cli("message", "--hive", self.hive, "--from", self.agent, "--to", to,
+                      "--type", "note", "--body", body, at=self.now)
+        assert rc == 0, out
 
     def claim(self, task):
         return cli("claim", "--hive", self.hive, "--task", task, "--agent", self.agent, at=self.now)[0]
@@ -85,12 +96,58 @@ class Session:
         git(self.wt, "commit", "-q", "-m", msg)
         return git(self.wt, "rev-parse", "HEAD")
 
-    def complete(self, task):
+    def complete(self, task, *extra):
         sha = git(self.wt, "rev-parse", "--short", "HEAD")      # what /swarm-worker records
         rc, out = cli("complete", "--hive", self.hive, "--task", task, "--agent", self.agent,
-                      "--result-ref", f"rip-swarm/{self.agent}@{sha}", at=self.now)
+                      "--result-ref", f"rip-swarm/{self.agent}@{sha}", *extra, at=self.now)
         assert rc == 0, out
         return sha
+
+    def body_sha(self, task):
+        """The sha a review, revise, rebase or follow-up body names to build on."""
+        sync(self.hive)
+        body = json.loads((self.hive / "inbox" / f"{task}.json").read_text(encoding="utf-8"))["body"]
+        return re.search(r"\b[0-9a-f]{7,40}\b", body).group(0)
+
+    def review(self, task, verdict, text, *, message=True, result_ref=None):
+        """/swarm-worker *Review tasks*, step by step. Returns the short sha, or
+        "refused" (claim exit 2), or "released" (the build did not merge cleanly)."""
+        if self.claim(task) != 0:
+            return "refused"
+        sha = self.body_sha(task)
+        sync_, build, _ = self.start_task(sha)                                     # step 1
+        if sync_ == "error" or build in ("conflict", "error"):                     # step 2
+            if run(self.wt, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
+                git(self.wt, "merge", "--abort")                                   # 2.1
+            note = f"review {task} cannot build on {sha}: conflict"                # the body's sha
+            rc, out = cli("release", "--hive", self.hive, "--task", task, "--agent", self.agent,
+                          "--note", note, at=self.now)                             # 2.2
+            assert rc == 0, out
+            if message:                                                            # 2.3
+                self.send("orchestrator", note)
+            return "released"
+        doc = self.wt / "spec.md"                                                  # steps 3-4
+        doc.write_text(doc.read_text(encoding="utf-8") + text, encoding="utf-8")
+        git(self.wt, "add", "-A")
+        git(self.wt, "commit", "-q", "-m", f"{task}: review")
+        if result_ref is not None:                                                 # a slip, for badsha
+            rc, out = cli("complete", "--hive", self.hive, "--task", task, "--agent", self.agent,
+                          "--result-ref", result_ref, "--verdict", verdict, at=self.now)
+            assert rc == 0, out
+            return result_ref
+        return self.complete(task, "--verdict", verdict)                          # step 5
+
+    def fold(self, task, text):
+        """A revise, rebase or follow-up of a reviewed artifact: /swarm-worker §5
+        with BUILD_ON from the body. A conflict is the work: `text` resolves it."""
+        if self.claim(task) != 0:
+            return "refused"
+        sync_, build, _ = self.start_task(self.body_sha(task))
+        assert sync_ in ("merged", "reset", "none") and build in ("merged", "conflict"), (sync_, build)
+        (self.wt / "spec.md").write_text(text, encoding="utf-8")
+        git(self.wt, "add", "-A")
+        git(self.wt, "commit", "-q", "-m", f"{task}: fold")
+        return self.complete(task)
 
 
 class Master(Session):
@@ -99,9 +156,11 @@ class Master(Session):
         stone = next((self.hive / "claims").glob(f"{task}.complete.*.json"))
         return json.loads(stone.read_text(encoding="utf-8"))["result_ref"].split("@", 1)[1]
 
-    def handle_complete(self, task, check):
+    def handle_complete(self, task, check, **arms):
         """`wake task-finished <task> complete` per /swarm-master §6."""
         sync(self.hive)
+        if self.in_chain(task):                                                    # step 0
+            return self.chain_wake(task, check=check, **arms)
         if (self.hive / "accepted" / f"{task}.json").exists():
             return "noop"
         board = read_board(self.hive, self.now)
@@ -160,7 +219,7 @@ class Master(Session):
         resolved = run(wt, "rev-parse", "-q", "--verify", f"{short}^{{commit}}")
         if resolved.returncode != 0:
             return "badsha"                                               # nothing touched
-        full = resolved.stdout.strip()
+        full = self.last_full = resolved.stdout.strip()                           # the OUTCOME line's SHA=
         if git(wt, "status", "--porcelain"):
             return "dirty"                                                # nothing touched
         if self._ok("show-ref", "--verify", "--quiet", f"refs/heads/{review}"):
@@ -195,12 +254,13 @@ class Master(Session):
                       "--note", note, at=self.now)
         assert rc == 0, out
 
-    def handle_reject(self, task, wanted=()):
+    def handle_reject(self, task, wanted=(), **arms):
         """`wake task-finished <task> reject` per /swarm-master §6, step by step.
 
         `wanted` is the model's call: the rejected tasks whose work is still
         wanted. The orphan is always rejected here; the other choice is `review`.
         Every step reads the board first, so a rerun does nothing twice.
+        `arms` are the model's calls for *Review chains* (see `chain_wake`).
         Returns what it did."""
         sync(self.hive)
         board = read_board(self.hive, self.now)
@@ -208,40 +268,60 @@ class Master(Session):
         stone = next((self.hive / "claims").glob(f"{task}.reject.*.json"))
         note = json.loads(stone.read_text(encoding="utf-8")).get("note") or ""
         root = not re.fullmatch(r"dependency \S+ rejected", note)                 # step 1
-        chain = self._downstream(board, task)
-        if root:                                                                   # step 2
-            replaced = {}
-            for old in [task, *(tid for tid in chain if not board[tid].rejected)]:
-                if old not in wanted:
-                    continue
-                dead = {task, *chain}                                              # step 4 rejects these
-                found = [r for r in self.replacements(old)
-                         if not board[r].rejected and not any(
-                             dep in dead or board[dep].rejected for dep in board[r].after)]
-                if found:
-                    replaced[old] = found[0]                                       # the first usable
-                    continue
-                inbox = json.loads((self.hive / "inbox" / f"{old}.json").read_text(encoding="utf-8"))
-                after = [replaced.get(dep, dep) for dep in board[old].after        # swap, then drop
-                         if dep in replaced or not (dep in dead or board[dep].rejected)]
-                extra = [arg for dep in after for arg in ("--after", dep)]
-                if inbox.get("body") is not None:
-                    extra += ["--body", inbox["body"]]
-                if inbox.get("fixes"):
-                    extra += ["--fixes", inbox["fixes"]]
-                replaced[old] = self.post(f"{board[old].title} (replaces {old})", *extra)
-                done.append(f"post {replaced[old]}")
+        a = artifact_of(board, task)
+        chain_task = a is not None and a != task and not board[a].rejected         # chain case 1
+        has_chain = board[task].min_reviews >= 1 and bool(chain(board, task))       # chain case 2
+        if root and not chain_task and not has_chain:                              # step 2
+            done += self.replace(task, wanted)
             board = read_board(self.hive, self.now)
         x = board[task].fixes
-        if root and x and not board[x].settled and all(                           # step 3
+        if root and not chain_task and x and not board[x].settled and all(         # step 3
                 view.settled for view in fixers(board, x) if view.task_id != task):
             self.reject(x, "fix abandoned")
             done.append(f"orphan {x}")
         rc, out = cli("reject", "--hive", self.hive, "--task", task,               # step 4
                       "--agent", self.agent, "--cascade", at=self.now)
         assert rc == 0, out
-        done += [f"reject {line.split()[1]}" for line in out.splitlines()
-                 if line.startswith("rejected ")]
+        lines = out.splitlines()
+        done += [f"reject {line.split()[1]}" for line in lines if line.startswith("rejected ")]
+        if any(line.startswith("skipped ") and "(chain of " not in line for line in lines):
+            return done + ["stop"]                                                 # §2's stop
+        if chain_task:
+            done += self.chain_wake(task, **arms)
+        return done
+
+    def replace(self, task, wanted):
+        """The reject handler's step 2, "Replacements": `task`'s replacement, then
+        each dependent that is not rejected yet, for those in `wanted`, unless the
+        grep finds a usable one. `task` is rejected, or about to be (*Review
+        chains* `merge` item 6 runs this before it rejects A). Returns the posts."""
+        board = read_board(self.hive, self.now)
+        deps = self._downstream(board, task)
+        dead = {task, *(tid for tid, _ in downstream(board, task))}              # step 4 rejects these
+        replaced, done = {}, []
+        for old in [task, *(tid for tid in deps if not board[tid].rejected)]:
+            if old not in wanted:
+                continue
+            found = [r for r in self.replacements(old)
+                     if not board[r].rejected and not any(
+                         dep in dead or board[dep].rejected for dep in board[r].after)]
+            if found:
+                replaced[old] = found[0]                                           # the first usable
+                continue
+            inbox = self.inbox(old)
+            after = [replaced.get(dep, dep) for dep in board[old].after            # swap, then drop
+                     if dep in replaced or not (dep in dead or board[dep].rejected)]
+            extra = [arg for dep in after for arg in ("--after", dep)]
+            if inbox.get("body") is not None:
+                extra += ["--body", inbox["body"]]
+            if inbox.get("fixes"):
+                extra += ["--fixes", inbox["fixes"]]
+            if inbox.get("kind") is not None:                                      # copied, whatever
+                extra += ["--kind", inbox["kind"]]                                 # the profile says
+            if inbox.get("min_reviews") is not None:
+                extra += ["--min-reviews", str(inbox["min_reviews"])]
+            replaced[old] = self.post(f"{board[old].title} (replaces {old})", *extra)
+            done.append(f"post {replaced[old]}")
         return done
 
     @staticmethod
@@ -261,6 +341,149 @@ class Master(Session):
         return sorted(p.stem for p in (self.hive / "inbox").glob("task_*.json")
                       if json.loads(p.read_text(encoding="utf-8"))["title"]
                       .endswith(f" (replaces {task})"))
+
+    def inbox(self, task):
+        return json.loads((self.hive / "inbox" / f"{task}.json").read_text(encoding="utf-8"))
+
+    def completer(self, task):
+        """(agent, result_ref) from `claims/<task>.complete.*.json`."""
+        stone = next((self.hive / "claims").glob(f"{task}.complete.*.json"))
+        doc = json.loads(stone.read_text(encoding="utf-8"))
+        return doc["agent"], doc["result_ref"]
+
+    def in_chain(self, task):
+        """§6 step 0: min_reviews >= 1, or `reviews`, or `fixes` of such an artifact."""
+        doc = self.inbox(task)
+        if (doc.get("min_reviews") or 0) >= 1 or doc.get("reviews"):
+            return True
+        return bool(doc.get("fixes")) and (self.inbox(doc["fixes"]).get("min_reviews") or 0) >= 1
+
+    def reviews(self, task):
+        rc, out = cli("reviews", "--hive", self.hive, "--task", task, at=self.now)
+        assert rc == 0, out
+        return dict(field.split("=", 1) for field in out.split())
+
+    def chain_wake(self, task, *, check=None, judge=None, worth=True, wanted=()):
+        """/swarm-master *Review chains*: run reviews.py and act on NEXT, arm by arm.
+
+        The model's calls: `check(wt)` is A's acceptance check on the merged tree,
+        `judge(head)` says why a review head is too thin or contradicts its verdict
+        (None: it is fine; no judge: every review is fine), `worth` is False for
+        *not worth pursuing*, and `wanted` is the set of A and its dependents whose
+        work is still wanted then (the reject handler's step 2).
+        Returns what it did: `review <id>`, `revise <id>`, `rebase <id>`,
+        `reject <id>`, `post <id>`, `accepted`, `short <id>`, `moved`, `restart`,
+        or an OUTCOME (`dirty`, `error`)."""
+        sync(self.hive)
+        arms = dict(check=check, judge=judge, worth=worth, wanted=wanted)
+        line = self.reviews(task)
+        nxt, a, head = line["NEXT"], line["ARTIFACT"], line["HEAD"]
+        title = self.inbox(a)["title"]
+        if nxt in ("post-rebase", "reject-review"):                                # arm 1
+            done = []
+            if nxt == "post-rebase":
+                reb = self.post(f"Rebase {title} onto rip-swarm/integration", "--fixes", a,
+                                "--body", f"Merge {line['SHA']} onto rip-swarm/integration and "
+                                          "resolve the conflict; the resolution is the work.")
+                done.append(f"rebase {reb}")
+            else:                                                                  # posted before a crash
+                board = read_board(self.hive, self.now)
+                reb = max((v for v in chain(board, a) if v.fixes == a), key=posting_order).task_id
+            self.reject(line["REVIEW"], f"superseded by rebase {reb}")
+            return done + [f"reject {line['REVIEW']}"]
+        if nxt in ("post-review", "post-revise", "merge") and judge \
+                and self.inbox(head).get("reviews"):                               # arm 2
+            why = judge(head)
+            if why:
+                self.reject(head, f"review rejected: {why}")
+                return [f"reject {head}", *self.chain_wake(task, **arms)]          # run it again
+        if nxt in ("done", "wait"):                                                # arm 3
+            return []
+        k = int(line["ROUNDS"].split("/")[0])
+        if nxt == "post-review":                                                   # arm 4
+            r = self.post(f"Review {k + 1} of {title}", "--reviews", a, "--body",
+                          f"Build on {line['SHA']} and review {title} there. Append the review "
+                          f"to spec.md as a numbered section, ## <n>. Review {k + 1} "
+                          f"(<your agent id>, <your harness>); for code, write "
+                          f"docs/reviews/{a}-r{k + 1}.md instead. Edit nothing else. "
+                          "Complete with --verdict clean only when the review has no finding "
+                          "that needs a change, otherwise --verdict findings.")
+            return [f"review {r}"]
+        if nxt == "post-revise":                                                   # arm 5
+            f = self.post(f"Revise {title} after review {k}", "--fixes", a, "--body",
+                          f"Build on {line['SHA']}; fold each finding of review {k} and add a "
+                          "dispositions table after the review section (finding, disposition, "
+                          "where).")
+            return [f"revise {f}"]
+        return self.merge_arm(a, line, **arms)                                     # arm 6
+
+    def merge_arm(self, a, line, *, check, judge=None, worth=True, wanted=()):
+        """*Review chains* arm 6: everything is about A; `<T>` is A throughout.
+        `line` is the reviews.py line that entered the arm. No heartbeat loop runs
+        here, so stopping it is a no-op."""
+        arms = dict(check=check, judge=judge, worth=worth, wanted=wanted)
+        title = self.inbox(a)["title"]
+        outcome = self.review_block(a, line["SHA"])                                # 6.1
+        if outcome == "conflict":                                                  # 6.4
+            reb = self.post(f"Rebase {title} onto rip-swarm/integration", "--fixes", a,
+                            "--body", f"Merge {self.last_full} onto rip-swarm/integration and "
+                                      "resolve the conflict; the resolution is the work.")
+            self.send(self.completer(a)[0], f"rebase {reb} of {a} is posted for you")  # A's author
+            return [f"rebase {reb}"]
+        if outcome == "badsha":                                                    # 6.8
+            worker, ref = self.completer(line["HEAD"])
+            self.reject(line["HEAD"], f"result_ref {ref} is not a commit")
+            self.send(worker, f"result_ref {ref} is not a commit")
+            return [f"reject {line['HEAD']}"]
+        if outcome != "merged":                                                    # 6.7
+            return [outcome]
+        review = f"rip-swarm/review-{a}"
+        if check(self.wt):
+            sync(self.hive)                                  # 6.2: the one-shot heartbeat syncs
+            again = self.reviews(a)
+            if (again["NEXT"], again["HEAD"], again["SHA"]) != ("merge", line["HEAD"], line["SHA"]):
+                assert self._ok("switch", "rip-swarm/integration") and self._ok("branch", "-D", review)
+                return ["moved", *self.chain_wake(a, **arms)]                      # act on the new line
+            if git(self.wt, "status", "--porcelain"):                              # 6.3: Passes item 1
+                return ["dirty"]
+            if git(self.wt, "rev-parse", "rip-swarm/integration") != self.last_tip:
+                return ["restart", *self.merge_arm(a, line, **arms)]               # MOVED: from 6.1
+            assert (self._ok("switch", "rip-swarm/integration")
+                    and self._ok("merge", "--ff-only", review) and self._ok("branch", "-d", review))
+            new_tip = git(self.wt, "rev-parse", "HEAD")
+            for tid in [*filter(None, line["CHAIN"].split(",")), a]:
+                rc, out = cli("accept", "--hive", self.hive, "--agent", self.agent, "--task", tid,
+                              "--integration-sha", new_tip, at=self.now)
+                assert rc == 0, out
+            return ["accepted"]
+        assert self._ok("switch", "rip-swarm/integration") and self._ok("branch", "-D", review)
+        if worth:                                                                  # 6.5
+            f = self.post(f"Follow up {title}", "--fixes", a, "--body",
+                          f"Build on {self.last_full}: close the gap the check found.")
+            return [f"short {f}"]
+        done = self.replace(a, wanted)                                             # 6.6: step 2 first
+        self.reject(a, "not worth pursuing")
+        return done + [f"reject {a}"]
+
+    def handle_release(self, task, **arms):
+        """`wake task-finished <task> release`: a chain task runs *Review chains*."""
+        sync(self.hive)
+        return self.chain_wake(task, **arms) if self.in_chain(task) else []
+
+    def handle_messages(self, **arms):
+        """`wake message`: a cannot-build message runs *Review chains* for its review."""
+        rc, out = cli("messages", "--hive", self.hive, "--to", self.agent, "--new", at=self.now)
+        assert rc == 0, out
+        done = []
+        for review in re.findall(r"review (task_\w+) cannot build on [0-9a-f]+: conflict", out):
+            done += self.chain_wake(review, **arms)
+        return done
+
+    def handle_idle(self, task, **arms):
+        """`wake idle-board <task>`: run the chain arms first; always report."""
+        sync(self.hive)
+        done = self.chain_wake(task, **arms) if self.in_chain(task) else []
+        return done + [f"report {task}"]
 
 
 def says(text):
@@ -701,6 +924,169 @@ class TestRehearsal(unittest.TestCase):
         self.assertIsNone(remote_show(self.origin, "claims/orchestrator.json"))
         self.assertEqual(git(self.repo, "show", "rip-swarm/integration:t.txt"), "T")
         self.assertTrue((self.repo / ".worktrees" / "integration").is_dir())
+
+    # Review chains (execution proposals §5.9): two workers, as the role skills assume.
+
+    def _artifact(self, n):
+        return self.m.post("Spec", "--kind", "spec", "--min-reviews", str(n), "--body", "Write spec.md")
+
+    def _write_artifact(self, a, text="# Spec\nv1\n"):
+        self.assertEqual(self.w1.claim(a), 0)
+        self.w1.start_task()
+        self.w1.work("spec.md", text, f"{a}: spec")
+        return self.w1.complete(a)
+
+    @staticmethod
+    def _ids(done, verb):
+        return [item.split()[1] for item in done if item.startswith(f"{verb} ")]
+
+    def _spec(self):
+        return git(self.repo, "show", "rip-swarm/integration:spec.md")
+
+    def test_spec_with_two_rounds_findings_then_clean(self):
+        a = self._artifact(2)
+        self._write_artifact(a)
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} complete"))
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.assertEqual(self.w1.review(r1, "clean", "x"), "refused")               # the author
+        self.w2.review(r1, "findings", "\n## Review 1\nfinding: say why\n")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} complete"))
+        [f1] = self._ids(self.m.handle_complete(r1, None), "revise")
+        self.assertEqual(self.w2.fold(f1, "x"), "refused")                          # the reviewer
+        self.w1.fold(f1, "# Spec\nv2, says why\n\n## Review 1\nfinding: say why\n\n"
+                         "### Dispositions\n| say why | accepted | v2 |\n")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{f1} complete"))
+        [r2] = self._ids(self.m.handle_complete(f1, None), "review")
+        self.w2.review(r2, "clean", "\n## Review 2\nno findings\n")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r2} complete"))
+        check = lambda wt: "Dispositions" in (wt / "spec.md").read_text(encoding="utf-8")
+        self.assertEqual(self.m.handle_complete(r2, check), ["accepted"])
+        for tid in (r1, f1, r2, a):
+            self.assertTrue((self.m.hive / "accepted" / f"{tid}.json").exists(), tid)
+        spec = self._spec()
+        for needle in ("## Review 1", "### Dispositions", "## Review 2"):
+            self.assertIn(needle, spec)
+        self.assertNotEqual(run(self.m.wt, "show-ref", "--verify", "--quiet",
+                                f"refs/heads/rip-swarm/review-{a}").returncode, 0)
+        self.assertEqual(self.m.tick(), Wake("all-complete"))
+
+    def test_the_author_is_refused_the_review_and_the_reviewer_the_revise(self):
+        a = self._artifact(1)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        err = io.StringIO()
+        rc, _ = cli("claim", "--hive", self.w1.hive, "--task", r1, "--agent", self.w1.agent, err=err)
+        self.assertEqual(rc, 2)
+        self.assertIn(f"{self.w1.agent} wrote part of {a}", err.getvalue())
+        self.w2.review(r1, "findings", "\n## Review 1\nfinding: x\n")
+        self.m.tick()
+        [f1] = self._ids(self.m.handle_complete(r1, None), "revise")
+        err = io.StringIO()
+        rc, _ = cli("claim", "--hive", self.w2.hive, "--task", f1, "--agent", self.w2.agent, err=err)
+        self.assertEqual(rc, 2)
+        self.assertIn(f"{self.w2.agent} reviewed {a}", err.getvalue())
+
+    def test_two_clean_rounds_by_the_same_reviewer(self):
+        a = self._artifact(2)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nno findings\n")
+        self.m.tick()
+        [r2] = self._ids(self.m.handle_complete(r1, None), "review")               # 1/2: again
+        self.assertNotEqual(self.w2.review(r2, "clean", "\n## Review 2\nno findings\n"), "refused")
+        self.m.tick()
+        self.assertEqual(self.m.handle_complete(r2, lambda wt: True), ["accepted"])
+
+    def test_a_takeover_mid_chain_posts_nothing_twice(self):
+        a = self._artifact(2)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "findings", "\n## Review 1\nfinding: x\n")
+        self.m.tick()
+        [f1] = self._ids(self.m.handle_complete(r1, None), "revise")
+        # The master dies here. A new one joins after its baton expired.
+        b = Master(join(self.repo, role="master", harness="claude-code", now=LATER), now=LATER)
+        self.w1.now = self.w2.now = LATER
+        posted = len(list((b.hive / "inbox").glob("task_*.json")))
+        for task in sorted([a, r1]):                                               # bare completes
+            self.assertEqual(b.tick(), Wake("task-finished", f"{task} complete"))
+            self.assertEqual(b.handle_complete(task, None), [])                    # NEXT=wait: F1 is open
+        self.assertEqual(b.tick(), Wake("idle-board", f1))                         # open since T0
+        self.assertEqual(b.handle_idle(f1), [f"report {f1}"])
+        self.assertEqual(len(list((b.hive / "inbox").glob("task_*.json"))), posted)
+        self.w1.fold(f1, "# Spec\nv2\n\n## Review 1\nfinding: x\n\n### Dispositions\n| x | done |\n")
+        self.assertEqual(b.tick(), Wake("task-finished", f"{f1} complete"))
+        self.assertEqual(len(self._ids(b.handle_complete(f1, None), "review")), 1)
+        self.assertEqual(b.handle_complete(f1, None), [])                          # a repeat posts nothing
+
+    def test_a_thin_or_contradicted_review_is_rejected_and_does_not_count(self):
+        for text, why in (("\n## Review 1\nok\n", "too thin"),
+                          ("\n## Review 1\nfinding: the spec skips errors\n", "clean over a listed finding")):
+            with self.subTest(why=why):
+                self.tearDown()
+                self.setUp()
+                a = self._artifact(1)
+                self._write_artifact(a)
+                self.m.tick()
+                [r1] = self._ids(self.m.handle_complete(a, None), "review")
+                self.w2.review(r1, "clean", text)
+                self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} complete"))
+                done = self.m.handle_complete(r1, None, judge=lambda head: why)
+                self.assertEqual(done[0], f"reject {r1}")
+                [r2] = self._ids(done, "review")                                   # round 1 again
+                self.assertEqual(self.m.reviews(a)["ROUNDS"], "0/1")
+                self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} reject"))
+                self.assertEqual(self.m.handle_reject(r1), [])                     # NEXT=wait
+                self.w2.review(r2, "clean", "\n## Review 2\nchecked every section; no findings\n")
+                self.m.tick()
+                self.assertEqual(self.m.handle_complete(r2, lambda wt: True, judge=lambda head: None),
+                                 ["accepted"])
+                self.assertFalse((self.m.hive / "accepted" / f"{r1}.json").exists())
+
+    def test_a_master_that_dies_after_rejecting_a_review_posts_on_the_reject_wake(self):
+        a = self._artifact(1)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nok\n")
+        self.m.tick()
+        self.m.reject(r1, "review rejected: too thin")                            # dies before the rerun
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} reject"))
+        self.assertEqual(len(self._ids(self.m.handle_reject(r1), "review")), 1)
+
+    def test_the_merge_rechecks_reviews_before_the_fast_forward(self):
+        a = self._artifact(1)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nno findings\n")
+        self.m.tick()
+        tip = git(self.m.wt, "rev-parse", "rip-swarm/integration")
+
+        def check(wt):                                   # the board moves during the check
+            self.m.reject(r1, "review rejected: found late")
+            return True
+
+        done = self.m.handle_complete(r1, check)
+        self.assertEqual(done[0], "moved")
+        self.assertEqual(len(self._ids(done, "review")), 1)
+        self.assertEqual(git(self.m.wt, "rev-parse", "rip-swarm/integration"), tip)
+        self.assertEqual(git(self.m.wt, "branch", "--show-current"), "rip-swarm/integration")
+        self.assertNotEqual(run(self.m.wt, "show-ref", "--verify", "--quiet",
+                                f"refs/heads/rip-swarm/review-{a}").returncode, 0)
+
+    def test_zero_rounds_is_todays_path(self):
+        a = self.m.post("Spec", "--kind", "spec", "--body", "Write spec.md")      # the profile's 0
+        self.assertEqual(self.m.inbox(a)["min_reviews"], 0)
+        self._write_artifact(a, "T\n")
+        self.m.tick()
+        self.assertFalse(self.m.in_chain(a))
+        self.assertEqual(self.m.handle_complete(a, lambda wt: True), "pass")
+        self.assertEqual(len(list((self.m.hive / "inbox").glob("task_*.json"))), 1)
+        self.assertEqual(self.m.tick(), Wake("all-complete"))
 
 
 if __name__ == "__main__":
