@@ -380,6 +380,17 @@ class Master(Session):
             return True
         return bool(doc.get("fixes")) and (self.inbox(doc["fixes"]).get("min_reviews") or 0) >= 1
 
+    def is_commit(self, sha):
+        """`git -C "$WORKTREE" rev-parse -q --verify "<SHA>^{commit}"` succeeds."""
+        return self._ok("rev-parse", "-q", "--verify", f"{sha}^{{commit}}")
+
+    def reject_badsha(self, task):
+        """The ordinary badsha reject of `task`, and a message to its worker."""
+        worker, ref = self.completer(task)
+        self.reject(task, f"result_ref {ref} is not a commit")
+        self.send(worker, f"result_ref {ref} is not a commit")
+        return [f"reject {task}"]
+
     def reviews(self, task):
         rc, out = cli("reviews", "--hive", self.hive, "--task", task, at=self.now)
         assert rc == 0, out
@@ -404,6 +415,10 @@ class Master(Session):
         title = self.inbox(a)["title"]
         if nxt in ("post-rebase", "reject-review"):                                # arm 1
             done = []
+            if nxt == "post-rebase" and not self.is_commit(line["SHA"]):           # no rebase can build
+                self.reject(line["REVIEW"], f"review {line['REVIEW']} cannot build: "
+                                            f"{line['SHA']} is not a commit")
+                return [f"reject {line['REVIEW']}", *self.chain_wake(task, **arms)]  # run it again
             if nxt == "post-rebase":
                 reb = self.post(f"Rebase {title} onto rip-swarm/integration", "--fixes", a,
                                 "--body", f"Merge {line['SHA']} onto rip-swarm/integration and "
@@ -414,9 +429,11 @@ class Master(Session):
                 reb = max((v for v in chain(board, a) if v.fixes == a), key=posting_order).task_id
             self.reject(line["REVIEW"], f"superseded by rebase {reb}")
             return done + [f"reject {line['REVIEW']}"]
-        if nxt in ("post-review", "post-revise", "merge") and judge \
+        if nxt in ("post-review", "post-revise", "merge") \
                 and self.inbox(head).get("reviews"):                               # arm 2
-            why = judge(head)
+            if not self.is_commit(line["SHA"]):                                    # `git show` fails:
+                return self.reject_badsha(head)                                    # merge item 8's case
+            why = judge(head) if judge else None
             if why:
                 self.reject(head, f"review rejected: {why}")
                 return [f"reject {head}", *self.chain_wake(task, **arms)]          # run it again
@@ -424,6 +441,8 @@ class Master(Session):
             return []
         k = int(line["ROUNDS"].split("/")[0])
         if nxt == "post-review":                                                   # arm 4
+            if not self.is_commit(line["SHA"]):                                    # A or a fix: no review
+                return self.reject_badsha(head)
             r = self.post(f"Review {k + 1} of {title}", "--reviews", a, "--body",
                           f"Build on {line['SHA']} and review {title} there. Append the review "
                           f"to spec.md as a numbered section, ## <n>. Review {k + 1} "
@@ -454,10 +473,7 @@ class Master(Session):
             self.send(self.completer(a)[0], f"rebase {reb} of {a} is posted for you")  # A's author
             return [f"rebase {reb}"]
         if outcome == "badsha":                                                    # 6.8
-            worker, ref = self.completer(line["HEAD"])
-            self.reject(line["HEAD"], f"result_ref {ref} is not a commit")
-            self.send(worker, f"result_ref {ref} is not a commit")
-            return [f"reject {line['HEAD']}"]
+            return self.reject_badsha(line["HEAD"])
         if outcome != "merged":                                                    # 6.7
             return [outcome]
         review = f"rip-swarm/review-{a}"
@@ -1259,6 +1275,67 @@ class TestRehearsal(unittest.TestCase):
         stone = next((self.w2.hive / "claims").glob(f"{r1}.release.*.json"))
         self.assertEqual(json.loads(stone.read_text(encoding="utf-8"))["note"],
                          f"review {r1} cannot build on deadbee: conflict")
+
+    def _bogus_artifact(self):
+        """A completed with a result_ref that is not a commit."""
+        a = self._artifact(1)
+        self.assertEqual(self.w1.claim(a), 0)
+        self.w1.start_task()
+        self.w1.work("spec.md", "# Spec\nv1\n", f"{a}: spec")
+        rc, out = cli("complete", "--hive", self.w1.hive, "--task", a, "--agent", self.w1.agent,
+                      "--result-ref", f"rip-swarm/{self.w1.agent}@deadbee", at=self.w1.now)
+        self.assertEqual(rc, 0, out)
+        return a
+
+    def test_an_artifact_whose_result_ref_is_not_a_commit_is_rejected_unreviewed(self):
+        # Grok review 1, m2: post-review on a non-commit would start a chain
+        # that can never build; A takes the ordinary badsha reject instead.
+        a = self._bogus_artifact()
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} complete"))
+        self.assertEqual(self.m.handle_complete(a, None), [f"reject {a}"])
+        board = read_board(self.m.hive, T0)
+        self.assertTrue(board[a].rejected)
+        self.assertEqual(chain(board, a), [])                                      # no review posted
+        stone = next((self.m.hive / "claims").glob(f"{a}.reject.*.json"))
+        note = f"result_ref rip-swarm/{self.w1.agent}@deadbee is not a commit"
+        self.assertEqual(json.loads(stone.read_text(encoding="utf-8"))["note"], note)
+        sync(self.w1.hive)
+        rc, out = cli("messages", "--hive", self.w1.hive, "--to", self.w1.agent, "--new", at=self.w1.now)
+        self.assertIn(note, out)                                                   # its author is told
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} reject"))
+        self.assertEqual(self.m.handle_reject(a), [])
+
+    def test_a_review_released_on_a_sha_that_is_not_a_commit_rejects_the_artifact(self):
+        # Grok review 1, m2: a review posted on a bogus sha (by a master before
+        # the check) is released as cannot-build; no rebase is posted for it.
+        a = self._bogus_artifact()
+        r1 = self.m.post("Review 1 of Spec", "--reviews", a, "--body",
+                         "Build on deadbee and review Spec there.")
+        self.assertEqual(self.w2.review(r1, "clean", "x", message=False), "released")
+        sync(self.m.hive)
+        self.assertEqual(self.m.reviews(a)["NEXT"], "post-rebase")
+        self.assertEqual(self.m.handle_release(r1), [f"reject {r1}", f"reject {a}"])
+        self.assertEqual(self._rebases(a), [])
+        board = read_board(self.m.hive, T0)
+        self.assertTrue(board[a].rejected and board[r1].rejected)
+
+    def test_a_review_head_that_is_not_a_commit_gets_no_next_round(self):
+        # Grok review 1, m2: arm 2's `git show` of a review head that is not a
+        # commit is merge item 8's case: that review is rejected, not A.
+        a = self.m.post("Spec", "--kind", "spec", "--min-reviews", "2", "--body", "Write spec.md")
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nno findings\n",
+                       result_ref=f"rip-swarm/{self.w2.agent}@deadbee")
+        sync(self.m.hive)
+        self.assertEqual(self.m.reviews(a)["NEXT"], "post-review")                 # rounds 1/2
+        self.m.tick()
+        self.assertEqual(self.m.handle_complete(r1, None), [f"reject {r1}"])
+        self.assertFalse(read_board(self.m.hive, T0)[a].rejected)
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} reject"))
+        [r2] = self._ids(self.m.handle_reject(r1), "review")                       # on A's sha again
+        self.assertEqual(self.w2.body_sha(r2), self.m.result_sha(a))
 
     def test_not_worth_pursuing_at_merge(self):
         for wanted in (False, True):

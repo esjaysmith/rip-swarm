@@ -356,6 +356,28 @@ class TestPackaging(unittest.TestCase):
         self.assertLess(review.index(loop), review.index("Read the artifact at that sha"))
         self.assertLess(review.index("Stop the heartbeat loop, commit"), review.index("--verdict clean"))
 
+    def test_master_checks_the_sha_before_posting_a_chain_task(self):
+        # Grok review 1, m2: a head whose result_ref is not a commit never took
+        # the badsha path; the chain posted reviews and rebases on it forever.
+        text = self._text("swarm-master")
+        chains = self._section(text, "### Review chains", "### `wake task-finished <T> release`")
+        check = 'WORKTREE=<WORKTREE>; git -C "$WORKTREE" rev-parse -q --verify "<SHA>^{commit}"'
+        post_review = self._section(chains, "4. **`post-review`**", "5. **`post-revise`**")
+        for needle in (check, '--task <HEAD> --agent "$AGENT" --note "result_ref <result_ref> is not a commit"',
+                       "`A`'s author when the head is `A`"):
+            self.assertIn(needle, post_review)
+        self.assertLess(post_review.index(check), post_review.index("--reviews <A>"))
+        rebase = self._section(chains, "- `post-rebase`:", "- `reject-review`:")
+        for needle in ("*post-review*'s command",
+                       '--note "review <REVIEW> cannot build: <SHA> is not a commit"',
+                       "then run the helper again and act on the new line"):
+            self.assertIn(needle, rebase)
+        self.assertLess(rebase.index("*post-review*'s command"), rebase.index("--title") if "--title" in rebase
+                        else rebase.index("Otherwise post a rebase"))
+        arm_2 = self._section(chains, "2. For `post-review`", "3. **`done` or `wait`**")
+        self.assertIn("If `git show` fails because `SHA` is not a commit", arm_2)
+        self.assertIn("that is `merge` item 8's case", arm_2)
+
     def test_master_merge_arm_resyncs_before_comparing(self):
         # Fix round 1, F2: reviews.py reads the local clone, which only a
         # heartbeat (one-shot or the loop's own publishes) fetches and
