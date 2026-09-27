@@ -295,6 +295,7 @@ class TestPackaging(unittest.TestCase):
         self.assertIn("*Review chains*", release)
         reject = self._section(text, "### `wake task-finished <T> reject`", "### Other wakes")
         for needle in ("**`<T>` is a chain task**", "skip steps 2 and 3", "**`<T>` is a reviewed artifact**",
+                       "**`<T>` is a chain task and `<A>` is rejected**: run step 4 only",
                        "`skipped <id> (chain of <T>) held by", "Skip step 2 when `<T>` has a chain",
                        "its `--kind` and `--min-reviews`"):
             self.assertIn(needle, reject)
@@ -438,11 +439,33 @@ class TestPackaging(unittest.TestCase):
 
     def test_master_merge_arm_stops_the_loop_on_every_path(self):
         # Fix round 1, F5: every hive write in the merge arm is preceded by
-        # stopping the heartbeat loop, stated once in the preamble.
+        # stopping the heartbeat loop. Grok review 3, M1: so is every report
+        # and stop, and every item names the stop itself.
         text = self._text("swarm-master")
         merge = self._section(text, "6. **`merge`.**", "7. **`OUTCOME=dirty`**")
-        self.assertIn("Stop the heartbeat loop before any hive write in this arm, on every path", merge)
-        self.assertIn("items 4, 7 and 8 do not repeat it below, but it applies there too", merge)
+        self.assertIn("Stop the heartbeat loop on every path of this arm, before its next hive write "
+                      "and before you report and stop or go back to section 5", merge)
+        stop = ('RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat '
+                '--hive "$HIVE" --task orchestrator --agent "$AGENT" --stop')
+        self.assertIn(stop, merge)
+        for start, end in (("   4. **`OUTCOME=conflict`**", "   5. **Falls short**"),
+                           ("   8. **`OUTCOME=badsha`**", "**A review that cannot build.**")):
+            item = self._section(text, start, end)
+            self.assertIn("stop the heartbeat loop", item.lower())
+        item_7 = self._section(text, "7. **`OUTCOME=dirty`**", "8. **`OUTCOME=badsha`**")
+        foreign = self._section(item_7, "Otherwise", "**`OUTCOME=error`**")
+        error = item_7[item_7.index("**`OUTCOME=error`**"):]
+        for sentence, report in ((foreign, "report them to the operator and stop"),
+                                 (error, "as step 8, with `T=<A>`")):
+            self.assertIn("stop the heartbeat loop (`--stop`) until it exits 0", sentence)
+            self.assertLess(sentence.index("`--stop`"), sentence.index(report))
+
+    def test_master_stops_the_loop_on_moved_before_step_4_again(self):
+        # Grok review 3, audit: step 4 opens with the one-shot heartbeat,
+        # which section 2 forbids while the loop runs.
+        text = self._text("swarm-master")
+        step_4 = self._section(text, "**Stop the heartbeat loop** as soon as", "5. **`OUTCOME=conflict`.**")
+        self.assertIn("on `MOVED:`, before you run step 4 again", step_4)
 
     def test_master_merge_arm_restarts_on_its_own_dirt(self):
         # Grok review 2, M2: step 7's "run step 4 again" leads to ordinary
@@ -452,8 +475,8 @@ class TestPackaging(unittest.TestCase):
         for needle in ("stop the heartbeat loop, remove them and restart this merge arm from item 1",
                        "as item 3 does on `MOVED:`",
                        "Never follow step 7's own \"run step 4 again\"",
-                       "Otherwise report them to the operator and stop, as step 7 does",
-                       "**`OUTCOME=error`**: as step 8, with `T=<A>`"):
+                       "then report them to the operator and stop, as step 7 does",
+                       "then as step 8, with `T=<A>`"):
             self.assertIn(needle, item_7)
 
     def test_master_merge_arm_starts_the_loop_before_the_block(self):

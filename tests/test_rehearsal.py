@@ -162,6 +162,24 @@ class Session:
 
 
 class Master(Session):
+    def __init__(self, result, now=T0):
+        super().__init__(result, now)
+        self.loop = []                  # section 2's heartbeat loop, recorded: "start", "stop"
+
+    def loop_start(self):
+        """`heartbeat --loop` in the background. Recorded, not run: the clock is
+        frozen, so the lease never runs short. A second start while one runs
+        would be exit 3; `loop_closed` catches it as two starts in a row."""
+        self.loop.append("start")
+
+    def loop_stop(self):
+        """`heartbeat --stop`, until it exits 0 (section 2)."""
+        self.loop.append("stop")
+
+    def loop_closed(self):
+        """Every start was followed by its stop, and nothing runs now."""
+        return self.loop == ["start", "stop"] * (len(self.loop) // 2)
+
     def result_sha(self, task):
         sync(self.hive)
         stone = next((self.hive / "claims").glob(f"{task}.complete.*.json"))
@@ -180,22 +198,28 @@ class Master(Session):
         return self.review(task, self.result_sha(task), check)
 
     def review(self, task, sha, check):
-        """Step 4's block, then step 9's check and Pass/Falls-short commands, per /swarm-master §6."""
+        """Step 4's block, then step 9's check and Pass/Falls-short commands, per /swarm-master §6.
+        The loop starts before the block and stops where step 4's stop sentence says."""
+        self.loop_start()
         outcome = self.review_block(task, sha)
         if outcome != "merged":
+            self.loop_stop()                                              # any other OUTCOME=
             return outcome
         wt, review = self.wt, f"rip-swarm/review-{task}"
         if not check(wt):
-            if not self._ok("switch", "rip-swarm/integration") or not self._ok("branch", "-D", review):
-                return "failed"
-            return "short"
+            ok = self._ok("switch", "rip-swarm/integration") and self._ok("branch", "-D", review)
+            self.loop_stop()                                              # after Falls short
+            return "short" if ok else "failed"
         if git(wt, "status", "--porcelain"):
-            return "dirty"
+            return "dirty"                                                # clean, run again: loop runs on
         if git(wt, "rev-parse", "rip-swarm/integration") != self.last_tip:
+            self.loop_stop()                                              # MOVED:, before step 4 again
             return "moved"
-        if not (self._ok("switch", "rip-swarm/integration")
-                and self._ok("merge", "--ff-only", review)
-                and self._ok("branch", "-d", review)):
+        ok = (self._ok("switch", "rip-swarm/integration")
+              and self._ok("merge", "--ff-only", review)
+              and self._ok("branch", "-d", review))
+        self.loop_stop()                                                  # NEW_TIP= or FAILED:
+        if not ok:
             return "failed"
         new_tip = git(wt, "rev-parse", "HEAD")
         rc, out = cli("accept", "--hive", self.hive, "--agent", self.agent, "--task", task,
@@ -282,6 +306,8 @@ class Master(Session):
         a = artifact_of(board, task)
         chain_task = a is not None and a != task and not board[a].rejected         # chain case 1
         has_chain = board[task].min_reviews >= 1 and bool(chain(board, task))       # chain case 2
+        if a is not None and a != task and board[a].rejected:                      # chain case 3:
+            root = False                                                           # step 4 only
         if root and not chain_task and not has_chain:                              # step 2
             done += self.replace(task, wanted)
             board = read_board(self.hive, self.now)
@@ -462,12 +488,14 @@ class Master(Session):
 
     def merge_arm(self, a, line, *, check, judge=None, worth=True, wanted=(), leftovers=True):
         """*Review chains* arm 6: everything is about A; `<T>` is A throughout.
-        `line` is the reviews.py line that entered the arm. Item 1's heartbeat and
-        loop start are not rehearsed (the clock is frozen, so the lease never runs
-        short), and stopping the loop is a no-op."""
+        `line` is the reviews.py line that entered the arm. Item 1's one-shot
+        heartbeat is not rehearsed (the clock is frozen); the loop is recorded."""
         arms = dict(check=check, judge=judge, worth=worth, wanted=wanted, leftovers=leftovers)
         title = self.inbox(a)["title"]
-        outcome = self.review_block(a, line["SHA"])                                # 6.1
+        self.loop_start()                                                          # 6.1
+        outcome = self.review_block(a, line["SHA"])
+        if outcome != "merged":                                                    # 6.4, 6.7, 6.8:
+            self.loop_stop()                                                       # right after the line
         if outcome == "conflict":                                                  # 6.4
             reb = self.post(f"Rebase {title} onto rip-swarm/integration", "--fixes", a,
                             "--body", f"Merge {self.last_full} onto rip-swarm/integration and "
@@ -480,10 +508,11 @@ class Master(Session):
             git(self.wt, "reset", "-q", "--hard")                                  # remove it, then
             git(self.wt, "clean", "-q", "-fd")                                     # restart from 6.1,
             return ["restart", *self.merge_arm(a, line, **arms)]                   # never ordinary 9
-        if outcome != "merged":                                                    # 6.7: report, stop
-            return [outcome]
+        if outcome != "merged":                                                    # 6.7: report, stop,
+            return [outcome]                                                       # the loop stopped
         review = f"rip-swarm/review-{a}"
         if check(self.wt):
+            self.loop_stop()                                                       # 6.2
             sync(self.hive)                                  # 6.2: the one-shot heartbeat syncs
             again = self.reviews(a)
             if (again["NEXT"], again["HEAD"], again["SHA"]) != ("merge", line["HEAD"], line["SHA"]):
@@ -502,6 +531,7 @@ class Master(Session):
                 assert rc == 0, out
             return ["accepted"]
         assert self._ok("switch", "rip-swarm/integration") and self._ok("branch", "-D", review)
+        self.loop_stop()                                                           # 6.5, 6.6
         if worth:                                                                  # 6.5
             f = self.post(f"Follow up {title}", "--fixes", a, "--body",
                           f"Build on {self.last_full}: close the gap the check found.")
@@ -727,6 +757,24 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(self.m.review_block(t, sha), "error")
         self.assertEqual(git(wt, "branch", "--show-current"), "rip-swarm/integration")
         self.assertFalse((self.m.hive / "accepted" / f"{t}.json").exists())
+
+    def test_a_moved_integration_stops_the_loop_before_step_4_again(self):
+        # Grok review 3, audit: on MOVED: the loop is still running, and step 4
+        # starts with the one-shot heartbeat, which section 2 forbids while it runs.
+        t = self.m.post("T")
+        self.w1.tick()
+        sha = self._done(self.w1, t, "T\n")
+
+        def check(wt):                                   # integration moves during the check
+            tip = git(wt, "rev-parse", "rip-swarm/integration")
+            moved = git(wt, "commit-tree", "-p", tip, "-m", "moved", f"{tip}^{{tree}}")
+            git(wt, "update-ref", "refs/heads/rip-swarm/integration", moved)
+            return True
+
+        self.assertEqual(self.m.review(t, sha, check), "moved")
+        self.assertEqual(self.m.loop, ["start", "stop"])                   # stopped before step 4
+        self.assertEqual(self.m.review(t, sha, says("T\n")), "pass")      # step 4 again
+        self.assertTrue(self.m.loop_closed(), self.m.loop)
 
     def test_crash_left_review_branch_mismatched_is_recreated(self):
         t = self.m.post("T")
@@ -1008,6 +1056,7 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(self.m.handle_complete(r2, check), ["accepted"])
         for tid in (r1, f1, r2, a):
             self.assertTrue((self.m.hive / "accepted" / f"{tid}.json").exists(), tid)
+        self.assertEqual(self.m.loop, ["start", "stop"])
         spec = self._spec()
         for needle in ("## Review 1", "### Dispositions", "## Review 2"):
             self.assertIn(needle, spec)
@@ -1118,6 +1167,7 @@ class TestRehearsal(unittest.TestCase):
         done = self.m.handle_complete(r1, check)
         self.assertEqual(done[0], "moved")
         self.assertEqual(len(self._ids(done, "review")), 1)
+        self.assertEqual(self.m.loop, ["start", "stop"])
         self.assertEqual(git(self.m.wt, "rev-parse", "rip-swarm/integration"), tip)
         self.assertEqual(git(self.m.wt, "branch", "--show-current"), "rip-swarm/integration")
         self.assertNotEqual(run(self.m.wt, "show-ref", "--verify", "--quiet",
@@ -1250,10 +1300,47 @@ class TestRehearsal(unittest.TestCase):
                     self.assertFalse((self.m.wt / "check.log").exists())
                     self.assertEqual(accepted, [True, True])
                     self.assertEqual(self.m.tick(), Wake("all-complete"))
+                    self.assertEqual(self.m.loop, ["start", "stop"] * 2)
                 else:                                                              # not ours: report
                     self.assertEqual(done, ["dirty"])
                     self.assertTrue((self.m.wt / "check.log").exists())
                     self.assertEqual(accepted, [False, False])
+                    self.assertEqual(self.m.loop, ["start", "stop"])               # Grok review 3, M1
+
+    def test_an_error_at_merge_stops_the_loop(self):
+        # Grok review 3, M1: `OUTCOME=error` was "as step 8": report and stop,
+        # with the loop of item 1 still heartbeating the baton.
+        a = self._artifact(1)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nno findings\n")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} complete"))
+        wt, review = self.m.wt, f"rip-swarm/review-{a}"
+        git(wt, "switch", "-c", review, git(wt, "rev-parse", "rip-swarm/integration"))
+        git(wt, "merge", "--no-ff", "--no-edit", self.m.result_sha(r1))    # crash before the check
+        git(wt, "switch", "rip-swarm/integration")
+        other = Path(self.tmp.name) / "elsewhere"
+        git(self.repo, "worktree", "add", "-q", str(other), review)        # the resume switch refuses it
+        self.assertEqual(self.m.handle_complete(r1, lambda wt: True), ["error"])
+        self.assertEqual(git(wt, "branch", "--show-current"), "rip-swarm/integration")
+        self.assertEqual(self.m.loop, ["start", "stop"])
+        self.assertFalse((self.m.hive / "accepted" / f"{a}.json").exists())
+
+    def test_a_conflict_at_merge_stops_the_loop_and_posts_the_rebase(self):
+        a = self._artifact(1)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nno findings\n")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} complete"))
+        (self.m.wt / "spec.md").write_text("# Other\n", encoding="utf-8")   # integration moved on
+        git(self.m.wt, "add", "spec.md")
+        git(self.m.wt, "commit", "-q", "-m", "other spec")
+        [reb] = self._ids(self.m.handle_complete(r1, lambda wt: True), "rebase")
+        self.assertEqual(self.m.inbox(reb)["fixes"], a)
+        self.assertEqual(self.m.loop, ["start", "stop"])
+        self.assertEqual(git(self.m.wt, "branch", "--show-current"), "rip-swarm/integration")
 
     def test_rejecting_a_revise_runs_reviews_and_never_the_orphan_step(self):
         a = self._artifact(1)
@@ -1302,6 +1389,34 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(self.m.replacements(a), [])
         self.assertEqual(self.m.tick(), Wake("all-complete"))
 
+    def test_a_holders_reject_after_the_artifact_is_rejected_posts_nothing(self):
+        # Grok review 3, m1: once A is rejected, a chain task's reject fell
+        # through to "run the steps as they are", and step 2 could post a
+        # replacement review with no --reviews, outside A's chain.
+        a = self._artifact(2)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nno findings\n")
+        self.m.tick()
+        [r2] = self._ids(self.m.handle_complete(r1, None), "review")
+        self.assertEqual(self.w2.claim(r2), 0)                                     # Bob holds it
+        self.m.reject(a, "not worth pursuing")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} reject"))
+        self.assertEqual(self.m.handle_reject(a, wanted={a}), [f"reject {r1}"])    # r2 skipped
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} reject"))
+        self.assertEqual(self.m.handle_reject(r1), [])
+        self.assertIsNone(self.m.tick())                                           # silent: r2 is held
+        rc, out = cli("reject", "--hive", self.w2.hive, "--agent", self.w2.agent, "--task", r2,
+                      "--note", "cannot review this", at=self.w2.now)              # Bob gives up
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r2} reject"))
+        before = int(git(self.origin, "rev-list", "--count", "swarm"))
+        self.assertEqual(self.m.handle_reject(r2, wanted={a, r2}), [])             # step 4 only
+        self.assertEqual(self.m.replacements(r2), [])
+        self.assertEqual(int(git(self.origin, "rev-list", "--count", "swarm")), before)
+        self.assertEqual(self.m.tick(), Wake("all-complete"))
+
     def test_badsha_at_merge_rejects_the_head_review_not_the_artifact(self):
         a = self._artifact(1)
         self._write_artifact(a)
@@ -1311,6 +1426,7 @@ class TestRehearsal(unittest.TestCase):
                        result_ref=f"rip-swarm/{self.w2.agent}@deadbee")
         self.m.tick()
         self.assertEqual(self.m.handle_complete(r1, lambda wt: True), [f"reject {r1}"])
+        self.assertEqual(self.m.loop, [])                                          # arm 2, before the merge
         self.assertFalse(read_board(self.m.hive, T0)[a].rejected)
         self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} reject"))
         self.assertEqual(len(self._ids(self.m.handle_reject(r1), "review")), 1)    # the head fell back
@@ -1402,6 +1518,7 @@ class TestRehearsal(unittest.TestCase):
                 done = self.m.handle_complete(r1, lambda wt: False, worth=False,
                                               wanted={a, d} if wanted else set())
                 self.assertEqual(done[-1], f"reject {a}")
+                self.assertEqual(self.m.loop, ["start", "stop"])
                 self.assertEqual(git(self.m.wt, "rev-parse", "rip-swarm/integration"), tip)
                 self.assertNotEqual(run(self.m.wt, "show-ref", "--verify", "--quiet",
                                         f"refs/heads/rip-swarm/review-{a}").returncode, 0)
@@ -1476,6 +1593,7 @@ class TestRehearsal(unittest.TestCase):
         self.m.tick()
         tip = git(self.m.wt, "rev-parse", "rip-swarm/integration")
         [f] = self._ids(self.m.handle_complete(r1, lambda wt: False), "short")
+        self.assertEqual(self.m.loop, ["start", "stop"])
         self.assertEqual(git(self.m.wt, "rev-parse", "rip-swarm/integration"), tip)
         self.assertEqual(self.m.inbox(f)["fixes"], a)
         self.w1.fold(f, "# Spec\nv2\n\n## Review 1\nno findings\n")
