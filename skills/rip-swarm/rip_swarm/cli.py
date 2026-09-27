@@ -32,7 +32,8 @@ from rip_swarm.outbox import write_message
 from rip_swarm.init_hive import init_hive
 from rip_swarm.join import join, leave
 from rip_swarm.lease import (
-    LoopRunning, acquire_loop_lock, heartbeat_loop, lease_ttl, release_loop_lock, stop_loop,
+    LoopRunning, LoopStop, acquire_loop_lock, heartbeat_loop, lease_ttl, release_loop_lock,
+    stop_loop,
 )
 from rip_swarm.lookback import write_lookback
 from rip_swarm.messages import format_messages, list_messages, unread_messages
@@ -533,12 +534,14 @@ def _heartbeat(args: argparse.Namespace, hive: Path, now: datetime, profile: dic
 def _heartbeat_loop(args: argparse.Namespace, hive: Path, profile: dict) -> None:
     """Execution proposals §3: the lease length comes from the profile, never
     from the skill's prose. SIGTERM (from --stop) ends the loop with exit 0
-    and removes its pid file; a lost lease ends it with exit 2."""
+    and removes its pid file, after the beat in progress if there is one; a
+    lost lease ends it with exit 2."""
     task_id = _require(args.task, "--task")
     agent = _require(args.agent, "--agent")
     _resolve_harness(hive, agent, args.harness)
     lock = acquire_loop_lock(hive, task_id)
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    stop = LoopStop()
+    signal.signal(signal.SIGTERM, stop)
     try:
         heartbeat_loop(
             hive, task_id, agent, ttl=lease_ttl(profile, task_id),
@@ -546,6 +549,7 @@ def _heartbeat_loop(args: argparse.Namespace, hive: Path, profile: dict) -> None
             clock=now_utc, sleep=time.sleep,
             out=lambda line: print(line, flush=True),
             err=lambda line: print(line, file=sys.stderr, flush=True),
+            stop=stop,
         )
     finally:
         release_loop_lock(lock)

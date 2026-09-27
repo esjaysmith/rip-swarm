@@ -82,7 +82,7 @@ Rules for tasks and claims:
 - `--fixes` links a follow-up or rebase task to the task it repairs.
 - `claim` exits 2 when the task is not yours: held by someone else, blocked, completed, rejected or accepted. If the message says *retry*, re-run the claim once.
 - Do not edit the project until `claim` prints `claimed … until …`.
-- Heartbeat at or before half the lease. `heartbeat --loop` does it for you while you work outside `wait`: it reads the lease from the profile, heartbeats each time half of it is gone, and runs until `heartbeat --stop` for the same task. A second loop for the same task exits 3. The loop exits 2 when the lease is gone.
+- Heartbeat at or before half the lease. `heartbeat --loop` does it for you while you work outside `wait`: it reads the lease from the profile, heartbeats each time half of it is gone, and runs until `heartbeat --stop` for the same task. `--stop` lets a heartbeat in progress finish and returns once the loop has exited; exit 1 means it did not exit within 60 seconds. A second loop for the same task exits 3. The loop exits 2 when the lease is gone.
 - `reject` by the baton holder drops a task that has no live claim. Workers may reject only what they hold.
 - `reject --cascade` (baton holder, once `ID` is rejected) rejects every task that waits on `ID` through `after`, directly or further down, in one publish, with the note `dependency ID rejected`. It prints `rejected <id>`, `already rejected <id>` or `skipped <id> held by <agent> until <time>` per task. It refuses `--note`.
 - `accept` is master-only and idempotent: a second call prints `already accepted`. It refuses a rejected task with exit 2.

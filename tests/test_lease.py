@@ -1,8 +1,11 @@
 # tests/test_lease.py — the heartbeat loop (execution proposals §3)
 import io
+import os
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import timedelta
@@ -15,8 +18,11 @@ from rip_swarm.cli import main
 from rip_swarm.gitops import GitopsError
 from rip_swarm.inbox import create_task
 from rip_swarm.lease import (
-    LoopRunning, acquire_loop_lock, heartbeat_loop, lease_ttl, release_loop_lock, stop_loop,
+    LoopRunning, LoopStop, LoopStopTimeout, acquire_loop_lock, heartbeat_loop, lease_ttl,
+    release_loop_lock, stop_loop,
 )
+from rip_swarm.state import state_dir
+from rip_swarm.timeutil import now_utc
 
 
 class Clock:
@@ -114,6 +120,71 @@ class TestHeartbeatLoop(unittest.TestCase):
             proc.kill()
             proc.wait()
 
+    def test_a_stop_during_a_beat_lets_the_beat_finish(self):
+        # Grok review 1, M2: SIGTERM mid-publish must not cut the beat short;
+        # the loop ends right after it. Outside a beat it ends the loop at once.
+        clock, stop = Clock(T0 + timedelta(seconds=1000)), LoopStop()
+
+        def beat(now):
+            stop(signal.SIGTERM, None)                         # --stop arrives mid-beat
+            return self.beat(now)
+
+        heartbeat_loop(self.hive, self.tid, "bob", ttl=1800, beat=beat, clock=clock,
+                       sleep=clock.sleep, out=self.lines.append, err=self.errors.append,
+                       stop=stop)                              # no max_beats: the stop ends it
+        self.assertEqual(self.beats, [T0 + timedelta(seconds=1000)])
+        self.assertEqual(len(self.lines), 1)
+        self.assertEqual(clock.slept, [])
+        with self.assertRaises(SystemExit) as cm:
+            LoopStop()(signal.SIGTERM, None)                   # while it sleeps
+        self.assertEqual(cm.exception.code, 0)
+
+    def test_a_loop_lock_is_never_seen_without_its_pid(self):
+        # Grok review 1, m1: a second --loop that looks while the first creates
+        # its lock must find the pid, never an empty file it would remove.
+        path = state_dir(self.hive) / f"rip-swarm-heartbeat-{self.tid}.pid"
+        seen, real_open, real_link = [], os.open, os.link
+
+        def racer():
+            if path.exists() and not seen:
+                seen.append("started")
+                try:
+                    release_loop_lock(acquire_loop_lock(self.hive, self.tid))
+                except LoopRunning:
+                    seen[0] = "refused"
+
+        def spy_open(*a, **k):
+            fd = real_open(*a, **k)
+            racer()
+            return fd
+
+        def spy_link(*a, **k):
+            real_link(*a, **k)
+            racer()
+
+        with mock.patch("os.open", spy_open), mock.patch("os.link", spy_link):
+            lock = acquire_loop_lock(self.hive, self.tid)
+        self.assertEqual(seen, ["refused"])
+        self.assertEqual(path.read_text(encoding="utf-8"), str(os.getpid()))
+        release_loop_lock(lock)
+        self.assertEqual(sorted(p.name for p in path.parent.iterdir() if "heartbeat" in p.name), [])
+
+    def test_stop_reports_a_loop_that_does_not_exit(self):
+        code = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
+        proc = subprocess.Popen([sys.executable, "-c", code, "--loop"])
+        try:
+            time.sleep(0.5)                                    # the handler is installed
+            path = acquire_loop_lock(self.hive, self.tid)
+            path.write_text(str(proc.pid), encoding="utf-8")
+            with self.assertRaisesRegex(LoopStopTimeout,
+                                        f"heartbeat loop {proc.pid} for {self.tid} did not stop"):
+                stop_loop(self.hive, self.tid, timeout=0.5)
+            self.assertIsNone(proc.poll())
+            self.assertTrue(path.exists())                     # it still runs: the lock stays
+        finally:
+            proc.kill()
+            proc.wait()
+
     def test_stop_never_kills_a_process_that_is_not_a_loop(self):
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         try:
@@ -151,6 +222,51 @@ class TestHeartbeatLoopCli(unittest.TestCase):
         self.assertIn(f"no active claim for {self.tid}", err)
         self.assertEqual(stop_loop(self.hive, self.tid),
                          f"no heartbeat loop running for {self.tid}")   # the pid file is gone
+
+    def test_stop_waits_for_a_loop_mid_beat_to_finish_and_exit(self):
+        # Grok review 1, M2: `--stop` sent mid-publish returns only once the
+        # loop process has exited, after the beat it was in has finished.
+        tid = create_task(self.hive, title="u", created_by="op", now=T0)["id"]
+        try_claim(self.hive, tid, "bob", "grok", now_utc(), 60)   # under half left: beats at once
+        marks = Path(self.tmp.name) / "marks"
+        marks.mkdir()
+        child = (
+            "import sys, time\n"
+            "from pathlib import Path\n"
+            "import rip_swarm.cli as cli\n"
+            "marks, real = Path(sys.argv[1]), cli._heartbeat\n"
+            "def slow(*a):\n"
+            "    (marks / 'start').write_text('')\n"
+            "    time.sleep(2)\n"
+            "    out = real(*a)\n"
+            "    (marks / 'end').write_text('')\n"
+            "    return out\n"
+            "cli._heartbeat = slow\n"
+            "sys.exit(cli.main(sys.argv[2:]))\n"
+        )
+        env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "skills" / "rip-swarm"))
+        proc = subprocess.Popen(
+            [sys.executable, "-c", child, str(marks), "heartbeat", "--hive", str(self.hive),
+             "--task", tid, "--agent", "bob", "--loop", "--local"],
+            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.monotonic() + 20
+            while not (marks / "start").exists():
+                if proc.poll() is not None:
+                    self.fail(proc.communicate())
+                self.assertLess(time.monotonic(), deadline)
+                time.sleep(0.05)
+            self.assertEqual(stop_loop(self.hive, tid), f"stopped heartbeat loop {proc.pid} for {tid}")
+            self.assertIsNotNone(proc.poll())                  # exited before stop_loop returned
+            self.assertTrue((marks / "end").exists())          # the beat finished
+            out, err = proc.communicate(timeout=10)
+            self.assertEqual(proc.returncode, 0, err)
+            self.assertIn(f"heartbeat {tid}", out)
+            self.assertEqual(stop_loop(self.hive, tid), f"no heartbeat loop running for {tid}")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.communicate()
 
     def test_stop_with_nothing_running(self):
         rc, out, _ = self.run_cli("heartbeat", "--hive", self.hive, "--task", self.tid,
