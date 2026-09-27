@@ -1206,6 +1206,23 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(len(self._ids(b.handle_reject(r1), "review")), 1)
         self.assertEqual(self._rebases(a), [f])
 
+    def test_a_second_release_of_the_same_review_posts_no_second_rebase(self):
+        # Grok review 2, M1: the master posts the rebase and dies before its
+        # reject. The review is still open, so a third worker claims it and
+        # releases it with the same note. The rebase already posted still counts.
+        a, sa, r1 = self._conflicting_review(message=False)
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} release"))
+        title = self.m.inbox(a)["title"]
+        f = self.m.post(f"Rebase {title} onto rip-swarm/integration", "--fixes", a, "--body",
+                        f"Merge {sa} onto rip-swarm/integration and resolve the conflict; "
+                        "the resolution is the work.")                             # then it dies
+        w3 = Session(join(self.repo, role="worker", harness="grok", now=T0))
+        w3.now += timedelta(minutes=1)                                             # a later second
+        self.assertEqual(w3.review(r1, "clean", "x"), "released")
+        self.assertEqual(self.m.tick(), Wake("message"))
+        self.assertEqual(self.m.handle_messages(), [f"reject {r1}"])               # NEXT=reject-review
+        self.assertEqual(self._rebases(a), [f])
+
     def test_rejecting_a_revise_runs_reviews_and_never_the_orphan_step(self):
         a = self._artifact(1)
         self._write_artifact(a)

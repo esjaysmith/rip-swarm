@@ -209,6 +209,29 @@ class TestNextStep(ChainCase):
         master_reject(self.hive, agent="master", task_id=r1, note="superseded", now=self.later())
         self.assertEqual(self.step(a).next, "wait")                         # the rebase is open
 
+    def test_a_second_cannot_build_release_keeps_the_rebase_posted(self):
+        # Grok review 2, M1: the review stays open until the master rejects it,
+        # so another worker may claim it and release it with the same note. The
+        # rebase posted after the first release still counts.
+        a = self.artifact(1)
+        sa = self.done(a, "alice")
+        r1 = self.post("Review", reviews=a)
+        note = f"review {r1} cannot build on {sa}: conflict"
+        try_claim(self.hive, r1, "bob", "grok", self.later(), 3600)
+        release(self.hive, r1, "bob", self.clock, note=note)
+        self.assertEqual(self.step(a).next, "post-rebase")
+        self.post("Rebase Spec onto rip-swarm/integration", fixes=a)
+        self.assertEqual(self.step(a).next, "reject-review")
+        try_claim(self.hive, r1, "carol", "claude-code", self.later(), 3600)
+        release(self.hive, r1, "carol", self.later(), note=note)
+        s = self.step(a)
+        self.assertEqual((s.next, s.review, s.sha), ("reject-review", r1, sa))
+        try_claim(self.hive, r1, "bob", "grok", self.later(), 3600)
+        release(self.hive, r1, "bob", self.later(), note="gave up")
+        try_claim(self.hive, r1, "carol", "claude-code", self.later(), 3600)
+        release(self.hive, r1, "carol", self.later(), note=note)
+        self.assertEqual(self.step(a).next, "reject-review")             # a note between
+
     def test_the_latest_release_of_one_second_decides(self):
         # Review Focus 2: the second release of a second is `<stamp>-2.json`,
         # which sorts before `<stamp>.json` by name.

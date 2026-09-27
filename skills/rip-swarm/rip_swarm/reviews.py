@@ -34,6 +34,12 @@ def _stamp_z(stamp: str) -> str:
     return f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}T{stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]}Z"
 
 
+def _cannot_build(stone: Tombstone, review_id: str) -> re.Match | None:
+    """The note of a release that says review `review_id` could not build."""
+    match = _CANNOT_BUILD.fullmatch((stone.doc() or {}).get("note") or "")
+    return match if match is not None and match["review"] == review_id else None
+
+
 def tombstones_by_task(hive: Path) -> dict[str, list[Tombstone]]:
     out: dict[str, list[Tombstone]] = {}
     for stone in list_tombstones(hive):
@@ -150,18 +156,20 @@ def next_step(hive: Path, board: dict[str, TaskView], task_id: str) -> Step:
         return step("done")
     # An open review whose latest release says it could not build. Read from
     # the board, so a takeover master that never saw the wake or the message
-    # still gets it (§5.4).
+    # still gets it (§5.4). The review stays open until the master rejects it,
+    # so another worker may release it again with the same note: a rebase
+    # counts from the earliest such release, never only from the latest.
     for view in st.tasks:
         if view.reviews != artifact_id or not view.is_open:
             continue
         released = [s for s in stones.get(view.task_id, []) if s.action == "release"]
         if not released:
             continue
-        note = (released[-1].doc() or {}).get("note") or ""
-        match = _CANNOT_BUILD.fullmatch(note)
-        if match is None or match["review"] != view.task_id:
+        match = _cannot_build(released[-1], view.task_id)
+        if match is None:
             continue
-        since = _stamp_z(released[-1].stamp)
+        first = next(s for s in released if _cannot_build(s, view.task_id) is not None)
+        since = _stamp_z(first.stamp)
         rebased = any(v.fixes == artifact_id and v.created_at >= since for v in st.tasks)
         return step("reject-review" if rebased else "post-rebase", sha=match["sha"],
                     review=view.task_id)
