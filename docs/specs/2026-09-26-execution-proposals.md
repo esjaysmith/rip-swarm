@@ -1,6 +1,6 @@
 # Execution proposals: cascade, heartbeat, result messages, minimum review rounds
 
-**Status:** proposal. §5 reviewed at `dc611ab` (§7): needs revision (2 critical, 5 major, 3 minor, 1 nit). Revision 2 folds §7 into §5 (dispositions in §8). §5 re-reviewed at `b74679a` (§9): needs revision (1 critical, 2 minor, 1 nit). Revision 3 folds §9 (dispositions in §10). §5 re-reviewed at `515ed0a` (§11): needs revision (1 major, 1 nit). Revision 4 folds §11 (dispositions in §12). A Grok review of `1e84398` (§13) is folded as revision 5 (dispositions in §14). The operator's fourth review, of `1e84398` (§15), is folded as revision 6 (dispositions in §16). A Grok review of `8c44ed2` (§17) is folded as revision 7 (dispositions in §18). Not folded into the roles-and-install spec or the skills.
+**Status:** proposal. §5 reviewed at `dc611ab` (§7): needs revision (2 critical, 5 major, 3 minor, 1 nit). Revision 2 folds §7 into §5 (dispositions in §8). §5 re-reviewed at `b74679a` (§9): needs revision (1 critical, 2 minor, 1 nit). Revision 3 folds §9 (dispositions in §10). §5 re-reviewed at `515ed0a` (§11): needs revision (1 major, 1 nit). Revision 4 folds §11 (dispositions in §12). A Grok review of `1e84398` (§13) is folded as revision 5 (dispositions in §14). The operator's fourth review, of `1e84398` (§15), is folded as revision 6 (dispositions in §16). A Grok review of `8c44ed2` (§17) is folded as revision 7 (dispositions in §18), and one of `2c044c7` (§19) as revision 8 (dispositions in §20). Not folded into the roles-and-install spec or the skills.
 **Date:** 2026-09-26
 **Audience:** operator + implementer
 **Related:** `docs/specs/2026-09-26-roles-and-install.md` §7.2, §7.4, §8 step 6, §9; `docs/specs/2026-09-17-design-spec.md` §9 (`reviews_required_per_plan` stays advisory); `skills/swarm-master/SKILL.md`; `skills/swarm-worker/SKILL.md`; `rip_swarm/waiter.py` (`tick`), `rip_swarm/acceptance.py` (`accept_task`), `rip_swarm/inbox.py`.
@@ -85,7 +85,7 @@ Keep messages for questions, for a release or a conflict the master would not ot
 
 ## 5. Minimum independent review rounds per artifact kind
 
-**Status:** design agreed with the operator (2026-09-26). Revision 2 folds the review in §7 (dispositions in §8); revision 3 folds the second review in §9 (dispositions in §10); revision 4 folds the third review in §11 (dispositions in §12); revision 5 folds a Grok review in §13 (dispositions in §14); revision 6 folds the fourth review in §15 (dispositions in §16); revision 7 folds a Grok review in §17 (dispositions in §18). It replaces the earlier sketch of consecutive clean reviews.
+**Status:** design agreed with the operator (2026-09-26). Revision 2 folds the review in §7 (dispositions in §8); revision 3 folds the second review in §9 (dispositions in §10); revision 4 folds the third review in §11 (dispositions in §12); revision 5 folds a Grok review in §13 (dispositions in §14); revision 6 folds the fourth review in §15 (dispositions in §16); revision 7 folds a Grok review in §17 (dispositions in §18); revision 8 folds a second Grok review in §19 (dispositions in §20). It replaces the earlier sketch of consecutive clean reviews.
 
 Today the master accepts a completed task after one judgment of its own. Nothing lets the operator say "a spec needs two independent reviews" in a way that a takeover master still sees and that the helpers enforce. With this section, every task the master marks as an artifact carries its number on the board, and no helper lets that number be lowered or its rounds skipped. Marking is the master's plan step: a task posted without `--kind` is not an artifact, and nothing forces one (§5.5). This section adds three things:
 - a number per artifact kind, stated once;
@@ -211,7 +211,7 @@ Because `NEXT=post-review` and `post-revise` appear only while no chain task is 
   - The target of `--reviews` must exist and have `min_reviews ≥ 1`.
   - `--reviews` cannot be combined with `--fixes`, `--min-reviews` or `--kind`.
   - `--min-reviews` must be an integer ≥ 0.
-  - `--kind` must be a key of the profile's `min_reviews` map. With `--kind K`, a missing `--min-reviews` takes the profile's `min_reviews[K]`, and a lower one is refused: `min_reviews for <K> is at least <n> (profile)`. A slip cannot post a spec with fewer reviews than the profile asks.
+  - `--kind` must be a key of the profile's `min_reviews` map. With `--kind K`, a missing `--min-reviews` takes the profile's `min_reviews[K]`, and a lower one is refused: `min_reviews for <K> is at least <n> (profile)`. A slip cannot post a spec with fewer reviews than the profile asks. **One exception, a replacement's copy.** A post titled `… (replaces <X>)` may copy `X`'s number even below the current profile, if `X` is a rejected task with the same `kind` and exactly that `min_reviews`. `X` may have been posted under a lighter profile (§5.1) that the current master was not started with. The helper checks `X` on the board, so the exception covers an exact copy and nothing else.
   - A master that leaves out `--kind` entirely still posts an unreviewed task. The skill's plan step (§5.6) is what marks the artifacts.
 - **`claim`** (exit 2, checked in `try_claim`, so every path is covered):
   - The independence rules of §5.3. A review task claimed by an author is refused with `<agent> wrote part of <A>; its review must come from another agent`. A fix of `A` claimed by a reviewer is refused with `<agent> reviewed <A>; its fixes must come from another agent`.
@@ -232,14 +232,15 @@ Because `NEXT=post-review` and `post-revise` appear only while no chain task is 
   2. Mark one task per kind as the artifact (§5.1).
   3. Post each artifact with `--kind <kind> --min-reviews <N>`, with N the larger of the phrase's number and the profile's.
   4. Post dependents and subtasks `--after` the artifact, so they stay blocked until it is accepted.
-- **`wake task-finished <T> complete`**, a new first step. If `T` has `min_reviews ≥ 1`, or has `reviews`, or has `fixes: A` where `A` has `min_reviews ≥ 1`, run `reviews.py --task <T>` and act on `NEXT`. The remaining steps apply only through `merge`.
-  - **Read the head first when it is a review.** If the review is too thin, or its verdict disagrees with its text (for example `clean` over listed findings), reject it (`claim.py reject … --note "review rejected: <why>"`), run `reviews.py` again, and act on the new `NEXT`.
+- **`wake task-finished <T> complete`**, a new first step. If `T` has `min_reviews ≥ 1`, or has `reviews`, or has `fixes: A` where `A` has `min_reviews ≥ 1`, run `reviews.py --task <T>` and act on `NEXT` with the arms below. The remaining steps of the skill's `complete` handler apply only through `merge`. **Every chain wake uses these same arms:** this one, the reject handler, and the release, message and `idle-board` wakes of a review that cannot build.
+  - `post-rebase` or `reject-review`: act as under *A review that cannot build* below. Check these first, before reading the head: these values are about an open released review, and the head may be an earlier review that is fine.
+  - **For `post-review`, `post-revise` and `merge`, read the head first when it is a review.** If the review is too thin, or its verdict disagrees with its text (for example `clean` over listed findings), reject it (`claim.py reject … --note "review rejected: <why>"`), run `reviews.py` again, and act on the new `NEXT`.
   - `done` or `wait`: nothing.
   - `post-review`: post `Review <k+1> of <title>` with `--reviews <A>`. The body names `SHA` and where the review goes (§5.3).
   - `post-revise`: post `Revise <title> after review <k>` with `--fixes <A>`. The body names `SHA` and the review's findings.
   - `merge`. This arm is entered from the wake of the clean head `R`, but everything it does is about `A`. **In every skill command below, `<T>` is `<A>`, not the woken task.** The review branch is `rip-swarm/review-<A>`, the `REVIEW=` value on the `OUTCOME=` line.
     1. Run `/swarm-master` §6 step 4, the `OUTCOME=` block, with `T=<A>` and `SHORT=<SHA>`. (That is the skill's §6, not this document's.) On `OUTCOME=merged` it stops with `WORKTREE` on `rip-swarm/review-<A>`. Run the master's acceptance check there, as in step 9.
-    2. On a pass, heartbeat and run `reviews.py --task <A>` again **before** step 9's fast-forward command (*Passes*, item 1). It must print `NEXT=merge` with the same `HEAD=` and `SHA=` as the `reviews.py` line that entered this arm. Both are the head's short sha. The `OUTCOME=` line's `SHA=` is the full id of the same commit and is not what is compared. Otherwise, run the *Falls short* command with `T=<A>`: it switches to `rip-swarm/integration` first, then deletes `rip-swarm/review-<A>` with `git branch -D`, because the branch is unmerged. Then act on the new `NEXT`.
+    2. On a pass, heartbeat and run `reviews.py --task <A>` again **before** step 9's fast-forward command (*Passes*, item 1). It must print `NEXT=merge` with the same `HEAD=` and `SHA=` as the `reviews.py` line that entered this arm. `HEAD=` is the head's task id, and `SHA=` is its short sha. The `OUTCOME=` line's `SHA=` is the full id of the same commit and is not what is compared. Otherwise, run the *Falls short* command with `T=<A>`: it switches to `rip-swarm/integration` first, then deletes `rip-swarm/review-<A>` with `git branch -D`, because the branch is unmerged. Then act on the new `NEXT`.
     3. Run the *Passes* item 1 fast-forward command with `T=<A>` and the `TIP` from the `OUTCOME=` line. In place of *Passes* items 2 and 3, accept each id in `CHAIN` in order, then `A`, all with `--integration-sha <NEW_TIP>`. If `accept` still refuses after the fast-forward, report it to the operator and stop. Do not reset integration: the skill never forces, and a worker may already have merged the new tip.
     4. **Conflict.** The block has already deleted `rip-swarm/review-<A>`. Post the rebase with the skill's own rebase command (`/swarm-master` §6 step 5) and `T=<A>`. It is posted with `--fixes <A>`, titled `Rebase <title> onto rip-swarm/integration`, and its body is `Merge <SHA> onto rip-swarm/integration and resolve the conflict; the resolution is the work.`, with `<SHA>` taken from the `OUTCOME=` line. A fix builds on the sha its body names, so without it the worker would rebuild from integration alone and drop the chain's commits. Then message the author of `A` (the agent that completed `A`), as today's step messages the worker. In a chain the head's completer is a reviewer, who is refused the rebase (§5.3), so the author is the worker who can take it.
     5. **Falls short.** Run the *Falls short* command with `T=<A>`, then post the follow-up with `--fixes <A>`, as today's *Falls short* step 2 does. Its body names the `SHA` from the `OUTCOME=` line to build on, and the gap to close.
@@ -250,7 +251,7 @@ Because `NEXT=post-review` and `post-revise` appear only while no chain task is 
   - from the message `review <R> cannot build on <sha>: conflict`, which `tick` reports first;
   - from `wake task-finished <R> release` with the same note. The skill's release handler, today "nothing required", gains this case.
 
-  Both arrivals, and an `idle-board` wake for a chain review, run `reviews.py --task <R>` and act on `NEXT`, so no handler parses the note. A takeover master gets the same `NEXT` from its first chain wake (§5.4).
+  Both arrivals, and an `idle-board` wake for a chain review, run `reviews.py --task <R>` and act on `NEXT` with the same arms as the `complete` wake, so no handler parses the note. A takeover master gets the same `NEXT` from its first chain wake, usually the artifact's unaccepted `complete` (§5.4), and acts on it there.
   - `post-rebase`:
     1. Post a rebase with `--fixes <A>` whose body is `Merge <SHA> onto rip-swarm/integration and resolve the conflict; the resolution is the work.`, with `<SHA>` from that line, which is the sha from the note. It is a new head and costs another round.
     2. Then reject `REVIEW` (`--note "superseded by rebase <id>"`).
@@ -260,7 +261,7 @@ Because `NEXT=post-review` and `post-revise` appear only while no chain task is 
 - **Reject handler.**
   - **`T` is a chain task and `A` is live**, whether the master rejected a review or a worker rejected what it held. Run step 1 (the cascade note), skip steps 2 and 3, and run step 4. Step 2 must not replace a chain task. Step 3 would treat a rejected revise as orphaning `A`, which is still live and awaiting its next round. Then run `reviews.py --task <T>` and act on `NEXT`. This is also what resumes a master that died between rejecting a review and posting the next round: the reject tombstone is a wake it has not seen yet.
   - **`T` is a reviewed artifact.** Step 4 uses `--cascade`, which rejects its chain along with its `after` dependents (§5.5). A skipped chain task, `(chain of <A>)`, is not §2's stop. Go back to wait: the derived wake stays quiet while that claim is live and returns when it ends. §2's stop still applies to a skipped `after` dependent.
-  - **Replacements.** A replacement of an artifact copies its `kind` and `min_reviews`, whatever the profile says now. A number raised by the goal phrase survives a takeover that way (§5.1).
+  - **Replacements.** A replacement of an artifact copies its `kind` and `min_reviews`, whatever the profile says now. A number raised by the goal phrase survives a takeover that way (§5.1), and a number lowered by a lighter profile is accepted as an exact copy (§5.5).
   - **A chain task that completes after `A` was rejected** gets `NEXT=done` from `reviews.py`. The derived wake then names `A` again, and its reject handler rejects the task. That is one path, not two.
 
 ### 5.7 Worker skill
@@ -291,7 +292,7 @@ A worker's brief still does not travel to the hive; the task body is what tells 
 ### 5.9 Testing
 
 - **Unit tests:**
-  - `inbox-add` field rules, including the profile floor and the default from `--kind`;
+  - `inbox-add` field rules, including the profile floor, the default from `--kind`, and the exact-copy exception for a `(replaces <X>)` post (refused when `X` is not rejected, or its `kind` or number differs);
   - the independence refusals in `try_claim`: an author refused a review; a reviewer refused a fix, whether it completed, released or still holds its review; and the same reviewer allowed a second round after its own clean review;
   - `claim` refused on a chain task of a rejected artifact;
   - `complete --verdict` required and refused;
@@ -310,7 +311,7 @@ A worker's brief still does not travel to the hive; the task body is what tells 
   - a master that dies after rejecting a review posts the next round on the reject wake;
   - a review that cannot build releases, the rebase is posted on the sha from its note, and it costs another round. The release wake alone posts it, and the message plus the release together post it once;
   - `reviews.py` is checked again before the fast-forward, comparing its `HEAD=` and short `SHA=` with the line that entered the arm, and a clean chain is accepted;
-  - a takeover after a review released as unable to build posts the rebase from the artifact's `complete` wake, and a crash between that post and the reject ends in `reject-review`;
+  - a takeover after a review released as unable to build posts the rebase from the artifact's `complete` wake (the `post-rebase` arm of that wake), and a crash between that post and the reject ends in `reject-review` on the rebase's own `complete` wake;
   - rejecting a revise of a live artifact runs `reviews.py` and never the orphan step;
   - a skipped claimed review in the artifact cascade does not stop the master;
   - `OUTCOME=badsha` at `merge` rejects the head review, not `A`;
@@ -679,3 +680,53 @@ Each finding was checked against §5, the roles spec and the code before it was 
 | m1. A replacement either copies `min_reviews` or recomputes it from the profile | Accepted. A replacement copies `kind` and `min_reviews`. The profile applies to any other artifact a later master posts. | §5.1, §5.6 |
 | m2. The review complete line drops `--result-ref` | Accepted. The review uses the worker's usual `complete` command with `--verdict` added. | §5.7 |
 | m3. The merge arm has no `badsha`, `dirty`, or `error` outcome | Accepted in part. `dirty` and `error` follow the skill's §6 steps 7 and 8 with `T=<A>`. Declined for `badsha`: rejecting `<A>`. At `merge` the head is always a review, so a missing commit means that review is bad, not the artifact. The master rejects the head review, and its reject wake runs `reviews.py` to post the round again. Rejecting `A` would drop a reviewed artifact for one reviewer's bad `result_ref`. | §5.6 `merge` steps 7 and 8, §5.9 |
+
+---
+
+## 19. Grok review of §5 (2026-09-27) — `2c044c7`
+
+**Reviewer:** Grok Build (`grok-4.7`, high effort), a fresh read-only run through the grok-build bridge over all of §5 at `2c044c7`, with the same brief as §17. Recorded as given, without its preamble.
+
+Revision 7 needs another pass. The helper rows for a review that cannot build are the right board test, but the `complete` procedure that actually runs on a takeover's first wake has no arm for either new value, so that wake does not post the rebase.
+
+What holds: With two workers, an author is refused every review and a reviewer, including one who only released, is refused every fix, so N=1 and N=2, findings and clean, each have a legal claimant and one reviewer can take every round. `post-review` and `post-revise` still appear only while no chain task is open, so a repeated complete does not post a second round. A thin review rejected in the complete handler is resumed by its reject tombstone. Rejecting the artifact cascades the chain, a `(chain of <A>)` skip goes back to wait, and the derived wake rejects a review that completes afterward. The merge arm fills `<T>` with the artifact, compares the two `reviews.py` lines rather than the full id on `OUTCOME=`, and the conflict body carries that full id and messages the author. A rejected revise skips the orphan step. `complete --verdict` stays exit 1, on the worker's usual `complete` line. `--kind` cannot go below the profile that the posting command loads, and the goal phrase is not read from the message log.
+
+### Major
+
+#### M1. The artifact's complete wake does not act on `post-rebase` or `reject-review`
+
+§5.4 returns those values from a `release` tombstone, and §5.9 says a takeover posts the rebase from the artifact's unaccepted `complete`. The procedure on that wake is the case list at §5.6: `done`, `wait`, `post-review`, `post-revise`, and `merge`. `post-rebase` and `reject-review` are not in it. Their actions sit under the message, the `release` wake, and `idle-board` (§5.6). The takeover sentence there says the new master gets the `NEXT`; it does not add those arms to the `complete` switch. A takeover seeds every `release` and starts the message cursor at the newest message (`state.py` lines 40–54), so those two triggers are already gone. `tick` reports the bare `complete` first (`waiter.py` lines 106–110).
+
+N=1, two workers. Worker 2 releases `R` with `review <R> cannot build on <sha>: conflict` and the seated master dies before handling it. The next master's first wake is `task-finished <A> complete`. `reviews.py` prints `NEXT=post-rebase REVIEW=<R> SHA=<sha>`. Nothing in the `complete` switch posts the rebase or rejects `R`. Worker 1 is offered `R` and refused as the author; that offer is marked seen. Worker 2 is not re-offered a task it released. The same switch drops `reject-review` when the rebase was posted before the crash and has even completed: the row is ahead of the head rows, so the rebase's own `complete` does not post the next round either.
+
+The only trigger still ahead is `idle-board`, once, after `idle_board_after` (`waiter.py` lines 126–135). That wake does run the arms. A master that stops on an unmatched `NEXT`, as it stops on other helper results it cannot place, never reaches it. If it waits, posts from `idle-board`, and dies after that wake is marked seen but before the post, a state-kept restart has the `complete` already seen and `idle-board` already reported, and neither worker can take `R`.
+
+Fix. On the `complete` wake, `post-rebase` and `reject-review` run the same steps as the release wake: post the rebase from `SHA` unless one is already posted, then reject `REVIEW`. Do this before "read the head", so an earlier clean review is not rejected on a wake whose `NEXT` is about the open release.
+
+### Minor
+
+#### m1. The profile floor refuses the replacement copy it is supposed to keep
+
+§5.1 and §5.6 say a replacement copies `kind` and `min_reviews`, whatever the profile says now. §5.5 refuses `--kind K` with `--min-reviews` below the profile the command loads, and that profile is `RIP_SWARM_PROFILE` or `default` (`profile.py` lines 43–56). The original profile name is not on the board.
+
+`profiles/default.yaml` has `spec: 2`. The operator starts the posting master with `RIP_SWARM_PROFILE=quick` and `quick` has `spec: 0`, which §5.1 gives as the way to run fewer reviews. The spec is stored with `min_reviews` 0. It is later rejected and the work is still wanted. A takeover started without that variable copies `--kind spec --min-reviews 0`. `inbox-add` exits 1, `min_reviews for spec is at least 2 (profile)`. The reject handler stops on a failed post (master skill line 171), before the cascade. Every later master on the default profile hits the same refusal, so the replacement is never posted.
+
+Fix. In §5.5, a post that copies an existing artifact's `kind` and `min_reviews` is not subject to the floor. The floor applies only to a number the master chose for a new artifact.
+
+### Nit
+
+#### n1. The re-check says `HEAD=` is a short sha
+
+§5.6 merge step 2: the second `reviews.py` line must match the entering line's `HEAD=` and `SHA=`, then "Both are the head's short sha." `HEAD=` is the task id (§5.4). `SHA=` is the short sha. The field compare itself matches on a clean chain. The sentence describes `HEAD=` as a sha, which is the confusion the re-check was rewritten to avoid.
+
+Fix. Say both lines' `SHA=` values are the head's short sha, and `HEAD=` is the head's task id.
+
+---
+
+## 20. Dispositions (revision 8, 2026-09-27)
+
+| Finding | Disposition | Where |
+|---|---|---|
+| M1. The artifact's complete wake does not act on `post-rebase` or `reject-review` | Accepted. The `complete` wake's arms now include `post-rebase` and `reject-review`, checked before the head is read. Every chain wake (complete, reject, release, message, `idle-board`) uses the same arms. | §5.6, §5.9 |
+| m1. The profile floor refuses the replacement copy it is supposed to keep | Accepted, narrowly. The floor exempts only an exact copy. The post's title ends in ` (replaces <X>)`, `X` is rejected, and `X` has the same `kind` and exactly that `min_reviews`. The helper checks all of it on the board, so a slip still cannot post a new artifact below the profile. | §5.5, §5.6, §5.9 |
+| n1. The re-check says `HEAD=` is a short sha | Accepted. `HEAD=` is the head's task id, and `SHA=` its short sha. | §5.6 `merge` step 2 |
