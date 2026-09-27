@@ -3664,3 +3664,75 @@ Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>"
 4. **`MOVED:` restarts the merge arm at item 1; every path stops the heartbeat loop before a hive write.** A plain step 9 fast-forward failure (`MOVED:`) would otherwise fall through to step 9's own advice, which never re-runs the compare against the now-moved tip, leaving `CHAIN` unaccepted forever. Restarting the arm from item 1 re-syncs and re-compares. Stopping the loop before any hive write in the arm (stated once in the preamble, applying to every item including 4, 7 and 8) keeps the loop's own background publishes from racing the arm's writes. Cost if wrong: a spurious extra reviews.py/heartbeat round-trip on `MOVED:`, or, if the stop-before-write rule were dropped, a race between the loop's heartbeat publish and the arm's own hive write.
 5. **Replacement floor: a replacement refused below the profile floor is re-posted without `--min-reviews`, taking the profile's number.** §5.5's exact-copy exception for a replacement needs the original already rejected, but §5.6 and the merge arm post the replacement *before* that reject, so the exception cannot apply yet; §5.1's "larger of" fallback (post again with `--kind` alone on a floor refusal) already covers exactly this shape, so it is reused here instead of inventing a new rule. This needs folding into the spec, which does not currently say what happens when a replacement's carried-over `--min-reviews` is below the profile floor. Cost if wrong: such a replacement needs more review rounds than its original did, a correctness-neutral but slower path.
 6. **Worker skill: a pointer at the top of section 5 sends review tasks to *Review tasks*.** Without it, step 1 of an ordinary task ("Start the task from `rip-swarm/integration`...") would run for a review task too and could tell a reviewer to resolve a conflict itself, which the review contract forbids (a reviewer never resolves; it reports `BUILD=conflict` and stops). The pointer routes a review task away before step 1 ever runs. Cost if wrong: none worth naming — the pointer only routes a review task to the procedure the spec already prescribes; without it a reviewer could follow step 1 and resolve a conflict inside a review.
+
+## Grok implementation review 1 (2026-09-27) — `4ef55aa`
+
+**Reviewer:** Grok Build (`grok-4.7`, high effort), a fresh read-only run through the grok-build bridge over `221ff96..4ef55aa`. Recorded as given, without its preamble.
+
+Needs another pass. The board rules for a review chain hold: `reviews.py`, `accept`, independence, `--cascade`, and the derived wake match sections 5.3–5.5 and the execution rulings. A review that fails to start, and stopping the heartbeat loop, can still stall the master or wedge the hive.
+
+### What holds
+
+Checked against `reviews.py`, `acceptance.py`, `claim.py`, `inbox.py`, `board.py`, `waiter.py`, and the master skill's chain arms, including the re-check of `HEAD=` and `SHA=` before the fast-forward. `NEXT` follows the section 5.4 table, including cannot-build versus a rebase already posted. `accept` refuses an artifact until the rounds are met and the head is a clean review, and `--via` does not skip that. A holder reject still counts as a reviewer; a master reject does not, because only the master tombstone stores `"action": "reject"`. Cascade skips a live claim, tombstones an expired one first, and publishes once. The derived wake stays quiet while a chain claim is live. With `min_reviews` at 0, none of that runs.
+
+### Major
+
+#### M1. A review that fails to start is released under the ordinary note, so the chain waits
+
+`skills/swarm-worker/SKILL.md:101`, `skills/swarm-worker/SKILL.md:123`, `skills/rip-swarm/rip_swarm/reviews.py:14`
+
+Review tasks say to run ordinary step 1, then, if `SYNC=error`, `BUILD=conflict`, or `BUILD=error`, release with `review <id> cannot build on <sha>: conflict`. Step 1's own `SYNC=error` / `BUILD=error` bullet is already terminal: release with `cannot start from integration: <git error>` and go back to waiting. Unlike the conflict bullet, it never mentions a review task. `reviews.py` only treats a note that fully matches `review <id> cannot build on <sha>: conflict` as `post-rebase`.
+
+Scenario: the review body names `deadbee`, which is not a commit. The start block sets `BUILD=error` and leaves no merge. Following step 1 releases the review with the ordinary note and stops. The next chain wake sees an open review and prints `NEXT=wait`. No rebase is posted. Later claims fail the same way. `tests/test_rehearsal.py:126` never takes that branch: `Session.review` always writes the cannot-build note, and `test_a_review_whose_build_fails_without_a_merge_still_releases` only checks that helper. A one-line check of the same regex matches the cannot-build note and does not match `cannot start from integration: …`.
+
+Fix: in step 1, point `SYNC=error` and `BUILD=error` at Review tasks the way the conflict bullet already does, and say that a review runs only the start block, then review step 2.
+
+#### M2. Stopping the heartbeat loop does not wait for its publish
+
+`skills/rip-swarm/rip_swarm/lease.py:107`, `skills/rip-swarm/rip_swarm/cli.py:541`, `skills/rip-swarm/rip_swarm/gitops.py:530`
+
+`stop_loop` sends `SIGTERM` and returns. The loop's handler is `sys.exit(0)`. `publish` resets the hive only on `Exception`. `SystemExit` is not an `Exception`, so a signal during fetch, commit, or push skips that reset. `os.kill` does not wait for the process, and it does not signal the `git` child.
+
+Scenario: the acceptance check outlasts half the lease, so the background loop is inside `heartbeat` on the master's hive clone. The merge arm stops the loop and immediately heartbeats or accepts. The loop's `git` is still using that clone. The next publish hits a dirty tree, an `index.lock`, or an unpushed commit and exits 1. A dirty hive blocks every later publish. `tests/test_lease.py:101` kills a sleeping process and waits in the test, not inside `stop_loop`. The rehearsal never starts the loop (`tests/test_rehearsal.py:445`).
+
+Fix: block `SIGTERM` for the duration of `beat()`, and have `stop_loop` wait until that pid has exited before it returns.
+
+#### M3. A review task never heartbeats
+
+`skills/swarm-worker/SKILL.md:70`, `skills/swarm-worker/SKILL.md:108`, `skills/swarm-worker/SKILL.md:121`
+
+Section 5 sends a review to Review tasks instead of steps 1–6. The heartbeat loop lives in step 3. Review tasks commit like step 4 and complete like step 5, and they never start the loop. Section 3 says the worker skill heartbeats around a long edit, using `worker_lease_ttl`. The template lease is 15 minutes.
+
+Scenario: the review takes longer than the lease. The claim expires. Another worker claims it. The first worker's `complete` exits 2, the re-claim fails, and that review is abandoned. The packaging test checks `--verdict` and the conflict release in the review section, not a heartbeat.
+
+Fix: start the loop before reading the artifact and stop it before `release` or `complete`, with the same commands as step 3.
+
+### Minor
+
+#### m1. Two heartbeat loops can start together
+
+`skills/rip-swarm/rip_swarm/lease.py:89`, `skills/rip-swarm/rip_swarm/state.py:93`
+
+The lock file is created empty, and the pid is written afterward. A second `--loop` that reads the empty file gets no pid, unlinks the file, and starts its own loop. Both then publish the same claim. The plan's rule that a second loop exits 3 holds only after the pid is on disk. `test_a_second_loop_is_refused` takes the lock only once it is fully written.
+
+Fix: write the pid through the creating fd before any other process can observe the file, and do not unlink a file that is empty and only a moment old.
+
+#### m2. A bad `result_ref` on the artifact itself never takes the badsha path
+
+`skills/swarm-master/SKILL.md:90`, `skills/swarm-master/SKILL.md:211`, `skills/rip-swarm/rip_swarm/reviews.py:171`
+
+Step 0 sends the artifact's complete wake through the chain arms and skips ordinary step 6, which is where a missing commit is rejected. `badsha` in the chain runs only inside `merge`, and at `merge` the head is a review. If the head is the artifact, `NEXT=post-review` and the body names that sha.
+
+Scenario: the artifact's `result_ref` is `deadbee`. The master posts a review. The worker releases it with the cannot-build note. The master posts `Merge deadbee onto rip-swarm/integration` and rejects the review. The author hits `BUILD=error` on the rebase and releases it with `cannot start from integration`. The review is already rejected, the rebase is open, and `reviews.py` prints `wait`. Nothing rejects the artifact. `test_badsha_at_merge_rejects_the_head_review_not_the_artifact` only covers a bad sha on the head review.
+
+Fix: in `post-review` and `post-rebase`, if `SHA` is not a commit, reject the artifact with the ordinary badsha note instead of posting another chain task.
+
+## Dispositions (Grok implementation review 1)
+
+| Finding | Disposition | Where (commit/file) |
+|---|---|---|
+| M1. A review that fails to start is released under the ordinary note | Accepted, fixed. Review tasks step 1 runs only step 1's command block (handling `SYNC=dirty` as step 1 says), then goes to Review tasks step 2, never to step 1's other bullets; step 1's `SYNC=error`/`BUILD=error` bullet now carries "(never in a review task: see **Review tasks**)", as the conflict bullet does. | `6d31569`; `skills/swarm-worker/SKILL.md`; needle `test_worker_review_runs_only_the_start_block` |
+| M2. Stopping the heartbeat loop does not wait for its publish | Accepted, fixed. The loop's SIGTERM handler (`LoopStop`) only records a stop that arrives during a beat, and the loop ends right after that beat; outside a beat it ends at once. `stop_loop` polls until the pid has exited (a zombie counts), up to 60 s, and exits 1 (`LoopStopTimeout`) if it has not. The reference skill says so. | `a85b32b`; `skills/rip-swarm/rip_swarm/lease.py`, `cli.py`, `skills/rip-swarm/SKILL.md`; `tests/test_lease.py` (`test_a_stop_during_a_beat_lets_the_beat_finish`, `test_stop_waits_for_a_loop_mid_beat_to_finish_and_exit`, `test_stop_reports_a_loop_that_does_not_exit`) |
+| M3. A review task never heartbeats | Accepted, fixed. Review tasks step 3 starts the heartbeat loop before the artifact is read, and stops it before `release` or `complete`, on every path; step 6 stops it before the commit and `complete`. | `6d31569`; `skills/swarm-worker/SKILL.md`; needle `test_worker_review_heartbeats_until_it_releases_or_completes` |
+| m1. Two heartbeat loops can start together | Accepted, fixed. `state.create_pid_file` writes the pid to a temporary file in the same directory and hard-links it into place, so a lock file is never seen without its pid. The wait lock had the same window and uses the same helper. | `a85b32b`; `skills/rip-swarm/rip_swarm/state.py`, `lease.py`; `test_a_loop_lock_is_never_seen_without_its_pid` |
+| m2. A bad `result_ref` on the artifact itself never takes the badsha path | Accepted, fixed. *Review chains* checks `rev-parse -q --verify "<SHA>^{commit}"` before posting: `post-review` rejects the head (`A` or a fix of `A`) with the ordinary badsha note and messages its author; `post-rebase` whose note names a non-commit rejects the released review, posts no rebase, and runs the helper again, whose `post-review` check then rejects the head. Arm 2's `git show` of a review head that is not a commit is `merge` item 8's case: that review is rejected. Mirrored in the rehearsal's `Master.chain_wake`. | `56ce9bb`; `skills/swarm-master/SKILL.md`; `tests/test_rehearsal.py` (`test_an_artifact_whose_result_ref_is_not_a_commit_is_rejected_unreviewed`, `test_a_review_released_on_a_sha_that_is_not_a_commit_rejects_the_artifact`, `test_a_review_head_that_is_not_a_commit_gets_no_next_round`); needle `test_master_checks_the_sha_before_posting_a_chain_task` |
