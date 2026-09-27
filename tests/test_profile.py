@@ -254,5 +254,28 @@ class TestProfile(unittest.TestCase):
         from rip_swarm.profile import DEFAULT_PROFILE
         self.assertEqual(DEFAULT_PROFILE["idle_board_after"], "10m")
 
+    def test_min_reviews_defaults_to_zero_per_kind(self):
+        from rip_swarm.profile import min_reviews_floors
+        prof = load_profile(self.hive, "default")
+        self.assertEqual(min_reviews_floors(prof), {"spec": 0, "plan": 0, "implementation": 0})
+        self._write_site("strict", "min_reviews:\n  spec: 2\n")
+        strict = load_profile(self.hive, "strict")
+        self.assertEqual(min_reviews_floors(strict), {"spec": 2, "plan": 0, "implementation": 0})
+
+    def test_min_reviews_must_be_whole_numbers(self):
+        from rip_swarm.profile import min_reviews_floors
+        for text in ("min_reviews:\n  spec: two\n", "min_reviews:\n  spec: -1\n",
+                     "min_reviews: 3\n"):
+            with self.subTest(text=text):
+                self._write_site("bad", text)
+                with self.assertRaisesRegex(ValueError, "min_reviews"):
+                    min_reviews_floors(load_profile(self.hive, "bad"))
+
+    def test_the_template_ships_zero_reviews(self):
+        from rip_swarm.init_hive import _DEFAULT_TEMPLATE
+        from rip_swarm.simpleyaml import load_yaml
+        doc = load_yaml((_DEFAULT_TEMPLATE / "profiles" / "default.yaml").read_text(encoding="utf-8"))
+        self.assertEqual(doc["min_reviews"], {"spec": 0, "plan": 0, "implementation": 0})
+
 if __name__ == "__main__":
     unittest.main()

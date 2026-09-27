@@ -64,6 +64,9 @@ class TaskView:
     accepted: bool
     returns: int  # release + expired tombstones
     blocked_by: tuple[str, ...]
+    kind: str | None = None
+    min_reviews: int = 0
+    reviews: str | None = None
 
     @property
     def generation(self) -> int:
@@ -136,12 +139,48 @@ def read_board(hive: Path, now: datetime) -> dict[str, TaskView]:
             accepted=tid in accepted,
             returns=sum(1 for a in acts if a in ("release", "expired")),
             blocked_by=tuple(dep for dep in after if dep not in accepted),
+            kind=doc.get("kind") if isinstance(doc.get("kind"), str) else None,
+            min_reviews=_reviews_needed(doc.get("min_reviews")),
+            reviews=doc.get("reviews") if isinstance(doc.get("reviews"), str) else None,
         )
     return board
 
 
 def fixers(board: dict[str, TaskView], task_id: str) -> list[TaskView]:
     return [view for _tid, view in sorted(board.items()) if view.fixes == task_id]
+
+
+def _reviews_needed(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def posting_order(view: TaskView) -> tuple[str, str]:
+    """`created_at` has one-second resolution, so the task id breaks ties
+    (execution proposals §5.3)."""
+    return (view.created_at, view.task_id)
+
+
+def artifact_of(board: dict[str, TaskView], task_id: str) -> str | None:
+    """The reviewed artifact (min_reviews >= 1) whose chain `task_id` is in:
+    itself, the task it `reviews`, or the task it `fixes`. None otherwise."""
+    view = board.get(task_id)
+    if view is None:
+        return None
+    if view.min_reviews >= 1:
+        return task_id
+    for ref in (view.reviews, view.fixes):
+        if ref and ref in board and board[ref].min_reviews >= 1:
+            return ref
+    return None
+
+
+def chain(board: dict[str, TaskView], artifact_id: str) -> list[TaskView]:
+    """Every review and every fix of `artifact_id`, in posting order; the
+    artifact itself is not included."""
+    return sorted(
+        (v for v in board.values() if v.reviews == artifact_id or v.fixes == artifact_id),
+        key=posting_order,
+    )
 
 
 def downstream(board: dict[str, TaskView], root: str) -> list[tuple[str, str | None]]:

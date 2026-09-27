@@ -39,7 +39,7 @@ from rip_swarm.messages import format_messages, list_messages, unread_messages
 from rip_swarm.orchestrator import heartbeat_orchestrator, promote, release_orchestrator
 from rip_swarm.paths import resolve_hive
 from rip_swarm.policy import try_claim_with_policy
-from rip_swarm.profile import load_profile
+from rip_swarm.profile import load_profile, min_reviews_floors
 from rip_swarm.registry import require_agent
 from rip_swarm.state import WaitRunning, ensure_state, mark_seen_open, save_state
 from rip_swarm.status import format_status, status_report
@@ -106,6 +106,10 @@ def _parser() -> argparse.ArgumentParser:
     inbox_p.add_argument("--after", action="append", default=[],
                          help="task id this task waits on (repeatable; must exist)")
     inbox_p.add_argument("--fixes", help="task id this follow-up or rebase task fixes")
+    inbox_p.add_argument("--kind", help="artifact kind: a key of the profile's min_reviews")
+    inbox_p.add_argument("--min-reviews", dest="min_reviews",
+                         help="review rounds this artifact needs (>= the profile's number)")
+    inbox_p.add_argument("--reviews", help="task id of the artifact this review task reviews")
 
     claim_p = sub.add_parser("claim", parents=[common], help="claim a task")
     claim_p.add_argument("--task", required=True)
@@ -329,6 +333,14 @@ def _require(value: str | None, flag: str) -> str:
     return str(value)
 
 
+def _whole_number(value: str | None, flag: str) -> int | None:
+    if value is None:
+        return None
+    if not str(value).isdigit():
+        raise ValueError(f"{flag} must be an integer >= 0, got {value!r}")
+    return int(value)
+
+
 def _resolve_harness(hive: Path, agent: str, given: str | None) -> str:
     """The registry is the source of truth for an agent's harness (§5 trust).
 
@@ -349,7 +361,11 @@ def _resolve_harness(hive: Path, agent: str, given: str | None) -> str:
 
 
 def _inbox_add(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
+    min_reviews = _whole_number(args.min_reviews, "--min-reviews")
+
     def op() -> dict:
+        # Read the profile inside the op, after publish fast-forwarded the hive.
+        floors = min_reviews_floors(load_profile(hive, args.profile)) if args.kind else None
         return create_task(
             hive,
             title=args.title,
@@ -358,6 +374,10 @@ def _inbox_add(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
             now=now,
             after=args.after,
             fixes=args.fixes,
+            kind=args.kind,
+            min_reviews=min_reviews,
+            reviews=args.reviews,
+            floors=floors,
         )
 
     return _run_op(
