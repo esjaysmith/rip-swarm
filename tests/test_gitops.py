@@ -766,6 +766,31 @@ class TestGitops(unittest.TestCase):
             "",
         )
         self.assertFalse((self.ha / "UNRELATED_LEAK.txt").exists())
+
+    def test_a_callable_allowlist_is_read_after_the_op(self):
+        from rip_swarm.gitops import GitopsError
+
+        written = []
+
+        def op():
+            name = "lookback/late.md"
+            (self.ha / "lookback").mkdir(exist_ok=True)
+            (self.ha / name).write_text("x\n", encoding="utf-8")
+            written.append(name)
+            return {}
+
+        publish(self.ha, task_id="__none__", op=op, message="late", agent="alice",
+                now=T0, allow=lambda: list(written))
+        _git(self.ha, "fetch")
+        self.assertIn("lookback/late.md", self._remote_tree(self.ha))
+
+        def leak():
+            (self.ha / "lookback" / "other.md").write_text("y\n", encoding="utf-8")
+            return {}
+
+        with self.assertRaises(GitopsError):
+            publish(self.ha, task_id="__none__", op=leak, message="leak", agent="alice",
+                    now=T0, allow=lambda: ["lookback/late.md"])
         _git(self.ha, "fetch")
         listed = self._remote_tree(self.ha)
         self.assertNotIn("UNRELATED_LEAK.txt", listed)

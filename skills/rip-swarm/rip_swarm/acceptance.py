@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rip_swarm.audit import append_claim_audit
-from rip_swarm.board import is_accepted, read_board
+from rip_swarm.board import downstream, is_accepted, read_board
 from rip_swarm.claim import ClaimDenied, _tombstone_candidates, tombstone_claim
 from rip_swarm.fold import Corrupt, Expired, Holder, active_holder
 from rip_swarm.ids import new_claim_id
@@ -105,8 +105,18 @@ def master_reject(
         )
     if isinstance(held, Corrupt):
         raise ClaimDenied(f"{task_id} has a corrupt claim file: {held.error}")
+    return _write_reject(hive, rec=rec, agent=agent, task_id=task_id, note=note, now=now,
+                         expired=isinstance(held, Expired))
+
+
+def _write_reject(
+    hive: Path, *, rec: dict, agent: str, task_id: str, note: str | None,
+    now: datetime, expired: bool,
+) -> dict:
+    """One master reject tombstone for a task nobody holds. An expired claim is
+    tombstoned `expired` first."""
     path = HivePaths(hive).claim(task_id)
-    if isinstance(held, Expired):
+    if expired:
         old = read_json(path)
         tombstone_claim(path, "expired", now)
         append_claim_audit(hive, action="expired", claim_doc=old, now=now)
@@ -125,3 +135,44 @@ def master_reject(
             break
     append_claim_audit(hive, action="reject", claim_doc=body, now=now)
     return body
+
+
+def cascade_reject(hive: Path, *, agent: str, task_id: str, now: datetime) -> dict:
+    """Reject, in one call, every task a reject of `task_id` cascades to
+    (execution proposals §2): each gets the note `dependency <T> rejected`.
+    A task with a live claim is skipped, not failed; an accepted one is left
+    alone; one already rejected is reported as such. Every walked task is
+    checked before anything is written, so a corrupt claim refuses the whole
+    cascade."""
+    _require_task(hive, task_id)
+    rec = _require_master(hive, agent, now)
+    board = read_board(hive, now)
+    root = board.get(task_id)
+    if root is None:
+        raise ClaimDenied(f"inbox task {task_id} is unreadable")
+    if not root.rejected:
+        raise ClaimDenied(f"{task_id} is not rejected; reject it before --cascade")
+    todo: list[tuple[str, bool]] = []
+    already: list[str] = []
+    skipped: list[dict] = []
+    for tid, chain_of in downstream(board, task_id):
+        view = board[tid]
+        if view.rejected:
+            already.append(tid)
+            continue
+        if view.accepted:
+            continue
+        held = active_holder(hive, tid, now)
+        if isinstance(held, Holder):
+            skipped.append({"task_id": tid, "agent": held.agent,
+                            "expires_at": format_z(held.expires_at), "chain_of": chain_of})
+            continue
+        if isinstance(held, Corrupt):
+            raise ClaimDenied(f"{tid} has a corrupt claim file: {held.error}")
+        todo.append((tid, isinstance(held, Expired)))
+    note = f"dependency {task_id} rejected"
+    for tid, expired in todo:
+        _write_reject(hive, rec=rec, agent=agent, task_id=tid, note=note, now=now,
+                      expired=expired)
+    return {"root": task_id, "rejected": [tid for tid, _ in todo],
+            "already": already, "skipped": skipped}

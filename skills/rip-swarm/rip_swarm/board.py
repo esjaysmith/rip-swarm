@@ -144,6 +144,22 @@ def fixers(board: dict[str, TaskView], task_id: str) -> list[TaskView]:
     return [view for _tid, view in sorted(board.items()) if view.fixes == task_id]
 
 
+def downstream(board: dict[str, TaskView], root: str) -> list[tuple[str, str | None]]:
+    """Every task a reject of `root` cascades to: the tasks that wait on it
+    through `after`, directly or further down, including a task that waits on
+    several tasks of the walk (execution proposals §2). Level by level, sorted
+    within a level. The second item names the artifact whose review chain the
+    task is in; it is None for an `after` dependent."""
+    seen, out, frontier = {root}, [], [root]
+    while frontier:
+        level = sorted(tid for tid, view in board.items()
+                       if tid not in seen and any(dep in seen for dep in view.after))
+        out.extend((tid, None) for tid in level)
+        seen.update(level)
+        frontier = level
+    return out
+
+
 def finished_reason(hive: Path, task_id: str) -> str | None:
     if is_accepted(hive, task_id):
         return "already accepted"

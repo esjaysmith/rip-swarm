@@ -10,7 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rip_swarm import __version__
-from rip_swarm.acceptance import accept_task, holds_baton, master_reject
+from rip_swarm.acceptance import accept_task, cascade_reject, holds_baton, master_reject
 from rip_swarm.board import read_board
 from rip_swarm.claim import ClaimDenied, complete, heartbeat, reject, release
 from rip_swarm.fold import Holder, active_holder
@@ -118,6 +118,11 @@ def _parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, parents=[common], help=help_text)
         p.add_argument("--task", required=True)
         p.add_argument("--note")
+
+    sub.choices["reject"].add_argument(
+        "--cascade", action="store_true",
+        help="baton holder: reject every task that waits on rejected --task, in one publish",
+    )
 
     acc_p = sub.add_parser(
         "accept", parents=[common],
@@ -539,6 +544,9 @@ def _reject(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     # --harness is optional; when given it must match the registry (§5 trust).
     _resolve_harness(hive, agent, args.harness)
 
+    if args.cascade:
+        return _reject_cascade(args, hive, now, task_id, agent)
+
     def op() -> dict:
         live = active_holder(hive, task_id, now)
         own_claim = isinstance(live, Holder) and live.agent == agent
@@ -560,6 +568,46 @@ def _reject(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
         now=now,
         allow=[f"claims/{task_id}.json", f"claims/{task_id}.*.json", "store/claims.jsonl"],
     )
+
+
+def _reject_cascade(
+    args: argparse.Namespace, hive: Path, now: datetime, task_id: str, agent: str
+) -> str:
+    """Execution proposals §2: one publish for the whole cascade. The op learns
+    which tasks it tombstones only after the fetch, so the allowlist is a
+    callable over what it wrote: each tombstoned task's claim paths, plus the
+    audit log."""
+    if args.note is not None:
+        raise ValueError("--cascade writes its own note (dependency <T> rejected); drop --note")
+    written: list[str] = []
+
+    def op() -> dict:
+        doc = cascade_reject(hive, agent=agent, task_id=task_id, now=now)
+        written[:] = doc["rejected"]
+        return doc
+
+    def allow() -> list[str]:
+        out = ["store/claims.jsonl"]
+        for tid in written:
+            out += [f"claims/{tid}.json", f"claims/{tid}.*.json"]
+        return out
+
+    doc = _run_op(
+        hive, local=args.local, task_id="__none__", message=f"reject --cascade {task_id}",
+        op=op, agent=agent, now=now, allow=allow,
+    )
+    return _cascade_lines(doc)
+
+
+def _cascade_lines(doc: dict) -> str:
+    lines = [f"rejected {tid}" for tid in doc["rejected"]]
+    lines += [f"already rejected {tid}" for tid in doc["already"]]
+    for skip in doc["skipped"]:
+        chain = f" (chain of {skip['chain_of']})" if skip.get("chain_of") else ""
+        lines.append(
+            f"skipped {skip['task_id']}{chain} held by {skip['agent']} until {skip['expires_at']}"
+        )
+    return "\n".join(lines) or f"nothing waits on {doc['root']}"
 
 
 def _accept(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
@@ -622,7 +670,7 @@ def _run_op(
     op: Callable[[], dict],
     agent: str | None = None,
     now: datetime | None = None,
-    allow: list[str] | None = None,
+    allow: list[str] | Callable[[], list[str]] | None = None,
 ) -> dict:
     if local:
         return op()
