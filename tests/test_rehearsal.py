@@ -118,10 +118,13 @@ class Session:
     def review(self, task, verdict, text, *, message=True, result_ref=None):
         """/swarm-worker *Review tasks*, step by step. Returns the short sha, or
         "refused" (claim exit 2), or "released" (the build did not merge cleanly)."""
-        if self.claim(task) != 0:
+        rc = self.claim(task)
+        if rc == 2:
             return "refused"
+        assert rc == 0, rc                                                         # any other exit is an error
         sha = self.body_sha(task)
         sync_, build, _ = self.start_task(sha)                                     # step 1
+        assert sync_ != "dirty", sync_                                             # never goes on after dirty
         if sync_ == "error" or build in ("conflict", "error"):                     # step 2
             if run(self.wt, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode == 0:
                 git(self.wt, "merge", "--abort")                                   # 2.1
@@ -146,8 +149,10 @@ class Session:
     def fold(self, task, text):
         """A revise, rebase or follow-up of a reviewed artifact: /swarm-worker §5
         with BUILD_ON from the body. A conflict is the work: `text` resolves it."""
-        if self.claim(task) != 0:
+        rc = self.claim(task)
+        if rc == 2:
             return "refused"
+        assert rc == 0, rc                                                         # any other exit is an error
         sync_, build, _ = self.start_task(self.body_sha(task))
         assert sync_ in ("merged", "reset", "none") and build in ("merged", "conflict"), (sync_, build)
         (self.wt / "spec.md").write_text(text, encoding="utf-8")
@@ -1106,6 +1111,202 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(len(list((self.m.hive / "inbox").glob("task_*.json"))), 1)
         self.assertEqual(self.m.tick(), Wake("all-complete"))
 
+    # Review chains, the failure paths (execution proposals §5.9).
+
+    def _conflicting_review(self, message=True):
+        """A's review cannot build: integration took another task's spec.md first.
+        Returns (a, sha of A, the released review)."""
+        a = self._artifact(1)
+        x = self.m.post("Other", "--body", "Write spec.md too")
+        sa = self._write_artifact(a)
+        self.assertEqual(self.w2.claim(x), 0)
+        self.w2.start_task()
+        self.w2.work("spec.md", "# Other\n", f"{x}: other")
+        self.w2.complete(x)
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} complete"))
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{x} complete"))
+        self.assertEqual(self.m.handle_complete(x, lambda wt: True), "pass")
+        self.assertEqual(self.w2.review(r1, "clean", "x", message=message), "released")
+        stone = next((self.w2.hive / "claims").glob(f"{r1}.release.*.json"))
+        note = json.loads(stone.read_text(encoding="utf-8"))["note"]
+        self.assertEqual(note, f"review {r1} cannot build on {sa}: conflict")  # the body's sha
+        self.assertNotEqual(git(self.w2.wt, "rev-parse", "--short", "HEAD"), sa)
+        self.assertNotEqual(run(self.w2.wt, "rev-parse", "-q", "--verify", "MERGE_HEAD").returncode, 0)
+        return a, sa, r1
+
+    def _rebases(self, a):
+        sync(self.m.hive)
+        board = read_board(self.m.hive, self.m.now)
+        return [v.task_id for v in chain(board, a) if v.title.startswith("Rebase ")]
+
+    def test_a_review_that_cannot_build_is_rebased_once_and_costs_a_round(self):
+        for message in (True, False):
+            with self.subTest(message=message):
+                self.tearDown()
+                self.setUp()
+                a, sa, r1 = self._conflicting_review(message=message)
+                if message:                                                        # the message first
+                    self.assertEqual(self.m.tick(), Wake("message"))
+                    done = self.m.handle_messages()
+                    self.assertEqual(self._ids(done, "reject"), [r1])
+                    # Both tombstones wake now; by name `reject` sorts before `release`.
+                    wakes = sorted(self.m.tick().detail for _ in range(2))
+                    self.assertEqual(wakes, sorted([f"{r1} reject", f"{r1} release"]))
+                    self.assertEqual(self.m.handle_release(r1), [])                # posts nothing more
+                    self.assertEqual(self.m.handle_reject(r1), [])
+                else:                                                              # the release alone
+                    self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} release"))
+                    self.assertEqual(self._ids(self.m.handle_release(r1), "reject"), [r1])
+                    self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} reject"))
+                    self.assertEqual(self.m.handle_reject(r1), [])
+                [f] = self._rebases(a)
+                self.assertEqual(self.w1.body_sha(f), sa)
+                self.assertEqual(self.w2.fold(f, "x"), "refused")                  # released a review
+                self.w1.fold(f, "# Spec\nv1\n# Other\n")                           # the author resolves
+                self.assertEqual(self.m.tick(), Wake("task-finished", f"{f} complete"))
+                [r2] = self._ids(self.m.handle_complete(f, None), "review")
+                self.assertEqual(self.m.reviews(a)["ROUNDS"], "0/1")               # another round
+                self.w2.review(r2, "clean", "\n## Review 1\nno findings\n")
+                self.assertEqual(self.m.tick(), Wake("task-finished", f"{r2} complete"))
+                self.assertEqual(self.m.handle_complete(r2, lambda wt: True), ["accepted"])
+                self.assertEqual(self.m.tick(), Wake("all-complete"))
+
+    def test_a_takeover_after_a_release_posts_the_rebase_then_recovers_a_crash(self):
+        a, sa, r1 = self._conflicting_review()
+        b = Master(join(self.repo, role="master", harness="claude-code", now=LATER), now=LATER)
+        self.w1.now = self.w2.now = LATER
+        self.assertEqual(b.tick(), Wake("task-finished", f"{a} complete"))        # its first chain wake
+        line = b.reviews(a)
+        self.assertEqual((line["NEXT"], line["REVIEW"], line["SHA"]), ("post-rebase", r1, sa))
+        title = b.inbox(a)["title"]
+        f = b.post(f"Rebase {title} onto rip-swarm/integration", "--fixes", a, "--body",
+                   f"Merge {sa} onto rip-swarm/integration and resolve the conflict; "
+                   "the resolution is the work.")                                  # then b dies
+        self.w1.fold(f, "# Spec\nv1\n# Other\n")
+        self.assertEqual(b.tick(), Wake("task-finished", f"{f} complete"))
+        self.assertEqual(b.handle_complete(f, None), [f"reject {r1}"])            # NEXT=reject-review
+        self.assertEqual(b.tick(), Wake("task-finished", f"{r1} reject"))
+        self.assertEqual(len(self._ids(b.handle_reject(r1), "review")), 1)
+        self.assertEqual(self._rebases(a), [f])
+
+    def test_rejecting_a_revise_runs_reviews_and_never_the_orphan_step(self):
+        a = self._artifact(1)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "findings", "\n## Review 1\nfinding: x\n")
+        self.m.tick()
+        [f1] = self._ids(self.m.handle_complete(r1, None), "revise")
+        self.m.reject(f1, "wrong approach")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{f1} reject"))
+        done = self.m.handle_reject(f1, wanted={f1, a})
+        self.assertFalse([d for d in done if d.startswith(("orphan", "post"))], done)
+        self.assertEqual(len(self._ids(done, "revise")), 1)
+        self.assertFalse(read_board(self.m.hive, T0)[a].rejected)
+
+    def test_rejecting_an_artifact_while_a_review_is_claimed(self):
+        a = self._artifact(2)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nno findings\n")
+        self.m.tick()
+        [r2] = self._ids(self.m.handle_complete(r1, None), "review")
+        self.assertEqual(self.w2.claim(r2), 0)                                     # held at the reject
+        self.m.reject(a, "not worth pursuing")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} reject"))
+        before = int(git(self.origin, "rev-list", "--count", "swarm"))
+        done = self.m.handle_reject(a, wanted={a})                                 # has a chain: no step 2
+        self.assertEqual(done, [f"reject {r1}"])                                   # the skip is no stop
+        self.assertEqual(int(git(self.origin, "rev-list", "--count", "swarm")), before + 1)
+        self.assertEqual(self.m.replacements(a), [])
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} reject"))
+        self.assertEqual(self.m.handle_reject(r1), [])                             # a cascade note
+        self.assertIsNone(self.m.tick())                                           # silent: r2 is held
+        # The held review's work by hand: `Session.review` would claim it again.
+        self.w2.start_task(self.w2.body_sha(r2))
+        self.w2.work("spec.md", "# Spec\nv1\n\n## Review 2\nno findings\n", f"{r2}: review")
+        self.w2.complete(r2, "--verdict", "clean")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r2} complete"))
+        self.assertEqual(self.m.handle_complete(r2, None), [])                     # NEXT=done
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} reject"))      # derived
+        self.assertEqual(self.m.handle_reject(a, wanted={a}), [f"reject {r2}"])
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r2} reject"))
+        self.assertEqual(self.m.handle_reject(r2), [])
+        self.assertEqual(self.m.replacements(a), [])
+        self.assertEqual(self.m.tick(), Wake("all-complete"))
+
+    def test_badsha_at_merge_rejects_the_head_review_not_the_artifact(self):
+        a = self._artifact(1)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nno findings\n",
+                       result_ref=f"rip-swarm/{self.w2.agent}@deadbee")
+        self.m.tick()
+        self.assertEqual(self.m.handle_complete(r1, lambda wt: True), [f"reject {r1}"])
+        self.assertFalse(read_board(self.m.hive, T0)[a].rejected)
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} reject"))
+        self.assertEqual(len(self._ids(self.m.handle_reject(r1), "review")), 1)    # the head fell back
+
+    def test_a_review_whose_build_fails_without_a_merge_still_releases(self):
+        a = self._artifact(1)
+        self._write_artifact(a)
+        r1 = self.m.post("Review 1 of Spec", "--reviews", a, "--body",
+                         "Build on deadbee and review Spec there.")                # no such commit
+        self.assertEqual(self.w2.review(r1, "clean", "x", message=False), "released")
+        stone = next((self.w2.hive / "claims").glob(f"{r1}.release.*.json"))
+        self.assertEqual(json.loads(stone.read_text(encoding="utf-8"))["note"],
+                         f"review {r1} cannot build on deadbee: conflict")
+
+    def test_not_worth_pursuing_at_merge(self):
+        for wanted in (False, True):
+            with self.subTest(wanted=wanted):
+                self.tearDown()
+                self.setUp()
+                a = self._artifact(1)
+                d = self.m.post("Build", "--after", a, "--body", "Build what spec.md says")
+                self._write_artifact(a)
+                self.m.tick()
+                [r1] = self._ids(self.m.handle_complete(a, None), "review")
+                self.w2.review(r1, "clean", "\n## Review 1\nno findings\n")
+                self.m.tick()
+                tip = git(self.m.wt, "rev-parse", "rip-swarm/integration")
+                done = self.m.handle_complete(r1, lambda wt: False, worth=False,
+                                              wanted={a, d} if wanted else set())
+                self.assertEqual(done[-1], f"reject {a}")
+                self.assertEqual(git(self.m.wt, "rev-parse", "rip-swarm/integration"), tip)
+                self.assertNotEqual(run(self.m.wt, "show-ref", "--verify", "--quiet",
+                                        f"refs/heads/rip-swarm/review-{a}").returncode, 0)
+                reps, d_reps = self.m.replacements(a), self.m.replacements(d)
+                self.assertEqual((len(reps), len(d_reps)), (1, 1) if wanted else (0, 0))
+                if wanted:                                                         # both before A's reject
+                    self.assertEqual(done, [f"post {reps[0]}", f"post {d_reps[0]}", f"reject {a}"])
+                    doc = self.m.inbox(reps[0])
+                    self.assertEqual((doc["kind"], doc["min_reviews"]), ("spec", 1))
+                    board = read_board(self.m.hive, T0)
+                    self.assertEqual(board[d_reps[0]].after, (reps[0],))           # waits on A's replacement
+                    self.assertFalse(board[d].rejected)                            # not yet: A's cascade does it
+                else:
+                    self.assertEqual(done, [f"reject {a}"])
+                self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} reject"))
+                self.assertEqual(sorted(self.m.handle_reject(a, wanted={a, d})),   # has a chain: no step 2
+                                 sorted([f"reject {d}", f"reject {r1}"]))
+                self.assertEqual((self.m.replacements(a), self.m.replacements(d)),
+                                 (reps, d_reps))                                   # none posted again
+                stone = next((self.m.hive / "claims").glob(f"{d}.reject.*.json"))
+                self.assertEqual(json.loads(stone.read_text(encoding="utf-8"))["note"],
+                                 f"dependency {a} rejected")                       # D, by the cascade
+                wakes = sorted(self.m.tick().detail for _ in range(2))
+                self.assertEqual(wakes, sorted([f"{d} reject", f"{r1} reject"]))
+                self.assertEqual(self.m.handle_reject(d, wanted={a, d}), [])       # a cascade note
+                self.assertEqual(self.m.handle_reject(r1), [])
+                if wanted:
+                    self.assertIsNone(self.m.tick())                               # the replacements are the plan
+                else:
+                    self.assertEqual(self.m.tick(), Wake("all-complete"))
+
     def _raise_floor(self, kind, n):
         """The operator raises a kind's profile floor after the plan was posted.
         It lands as any hive write does: one allowlisted publish, here from the
@@ -1139,6 +1340,32 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} reject"))
         self.assertEqual(self.m.handle_reject(a, wanted={a}), [f"reject {r1}"])
         self.assertEqual(self.m.replacements(a), [a2])                             # none posted again
+
+    def test_shortfall_at_merge_posts_a_follow_up_that_costs_a_round(self):
+        a = self._artifact(1)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nno findings\n")
+        self.m.tick()
+        tip = git(self.m.wt, "rev-parse", "rip-swarm/integration")
+        [f] = self._ids(self.m.handle_complete(r1, lambda wt: False), "short")
+        self.assertEqual(git(self.m.wt, "rev-parse", "rip-swarm/integration"), tip)
+        self.assertEqual(self.m.inbox(f)["fixes"], a)
+        self.w1.fold(f, "# Spec\nv2\n\n## Review 1\nno findings\n")
+        self.m.tick()
+        self.assertEqual(len(self._ids(self.m.handle_complete(f, None), "review")), 1)
+        self.assertEqual(self.m.reviews(a)["ROUNDS"], "1/1")                       # the head is the fix
+
+    def test_an_idle_review_nobody_may_claim_is_reported(self):
+        a = self._artifact(1)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.assertEqual(self.w1.review(r1, "clean", "x"), "refused")              # w2's brief excludes it
+        self.m.now = T0 + timedelta(minutes=11)
+        self.assertEqual(self.m.tick(), Wake("idle-board", r1))
+        self.assertEqual(self.m.handle_idle(r1), [f"report {r1}"])
 
 
 if __name__ == "__main__":
