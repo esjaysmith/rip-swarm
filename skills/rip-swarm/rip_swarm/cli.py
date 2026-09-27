@@ -41,6 +41,7 @@ from rip_swarm.paths import resolve_hive
 from rip_swarm.policy import try_claim_with_policy
 from rip_swarm.profile import load_profile, min_reviews_floors
 from rip_swarm.registry import require_agent
+from rip_swarm.reviews import next_step
 from rip_swarm.state import WaitRunning, ensure_state, mark_seen_open, save_state
 from rip_swarm.status import format_status, status_report
 from rip_swarm.timeutil import now_utc, parse_duration
@@ -126,6 +127,7 @@ def _parser() -> argparse.ArgumentParser:
     complete_p.add_argument("--task", required=True)
     complete_p.add_argument("--result-ref", required=True)
     complete_p.add_argument("--note")
+    complete_p.add_argument("--verdict", help="review tasks only: clean or findings")
 
     for name, help_text in (
         ("release", "release a held claim"),
@@ -164,6 +166,11 @@ def _parser() -> argparse.ArgumentParser:
     msg_p.add_argument("--body", required=True)
 
     sub.add_parser("status", parents=[common], help="read-only hive doctor")
+    rev_p = sub.add_parser(
+        "reviews", parents=[base],
+        help="read-only: the next step of a reviewed artifact's review chain",
+    )
+    rev_p.add_argument("--task", required=True)
     sub.add_parser(
         "sync", parents=[base], help="fetch and fast-forward the hive to origin/swarm"
     )
@@ -215,6 +222,8 @@ def _dispatch(args: argparse.Namespace) -> object:
         # unknown --profile behaves consistently (profile.py falls back).
         load_profile(hive, args.profile)
         return format_status(status_report(hive, now))
+    if args.command == "reviews":
+        return next_step(hive, read_board(hive, now), args.task).line()
     if args.command == "sync":
         return _sync(hive)
     if args.command == "wait":
@@ -550,7 +559,7 @@ def _complete(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     result_ref = _require(args.result_ref, "--result-ref")
 
     def op() -> dict:
-        return complete(hive, task_id, agent, now, result_ref, args.note)
+        return complete(hive, task_id, agent, now, result_ref, args.note, verdict=args.verdict)
 
     return _run_op(
         hive,

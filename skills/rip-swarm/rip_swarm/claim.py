@@ -233,6 +233,32 @@ def heartbeat(hive: Path, task_id: str, agent: str, now: datetime, lease_seconds
     return doc
 
 
+def _task_doc(hive: Path, task_id: str) -> dict:
+    try:
+        doc = read_json(HivePaths(hive).inbox_task(task_id))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def check_verdict(hive: Path, task_id: str, verdict: str | None) -> None:
+    """Execution proposals §5.5: a review task (`reviews` set) completes with
+    `clean` or `findings`, and no other task takes a verdict. This is a usage
+    error, ValueError (exit 1), never ClaimDenied: the worker skill reads exit 2
+    from `complete` as a lost lease."""
+    reviews = _task_doc(hive, task_id).get("reviews")
+    if reviews:
+        if verdict not in ("clean", "findings"):
+            got = "" if verdict is None else f", got {verdict!r}"
+            raise ValueError(
+                f"{task_id} reviews {reviews}: complete needs --verdict clean or findings{got}"
+            )
+    elif verdict is not None:
+        raise ValueError(
+            f"{task_id} is not a review task: --verdict is only for tasks posted with --reviews"
+        )
+
+
 def complete(
     hive: Path,
     task_id: str,
@@ -240,16 +266,20 @@ def complete(
     now: datetime,
     result_ref: str,
     note: str | None = None,
+    verdict: str | None = None,
 ) -> dict:
     if task_id == "orchestrator":
         raise ClaimDenied("orchestrator cannot be completed; use release")
     if not result_ref or not result_ref.strip():
         raise ClaimDenied("complete requires result_ref")
+    check_verdict(hive, task_id, verdict)
     path, doc = _require_holder(hive, task_id, agent, now)
     doc = dict(doc)
     doc["result_ref"] = result_ref.strip()
     if note is not None:
         doc["note"] = note
+    if verdict is not None:
+        doc["verdict"] = verdict
     _finalize(path, doc, "complete", now)
     append_claim_audit(hive, action="complete", claim_doc=doc, now=now, result_ref=doc["result_ref"])
     return doc
