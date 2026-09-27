@@ -109,7 +109,7 @@ If `<HIVE>/inbox/<id>.json` has `"reviews"`, this is a review task: follow **Rev
    ```bash
    RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT" --loop
    ```
-   It reads `worker_lease_ttl` from the profile and heartbeats each time half of it is gone. Stop it with the same command, `--stop` in place of `--loop`, as soon as that step ends, and always before step 4. Its end is not a wake. If it ended with exit 2 before you stopped it, you no longer hold the claim: handle it as an exit 2 from `heartbeat` (below).
+   It reads `worker_lease_ttl` from the profile and heartbeats each time half of it is gone. Stop it with the same command, `--stop` in place of `--loop`, as soon as that step ends, and always before step 4. Exit 1 from `--stop` means the loop has not exited within 60 seconds and may still be publishing: run `--stop` again, and make no hive write until it exits 0. Its end is not a wake. If it ended with exit 2 before you stopped it, you no longer hold the claim: handle it as an exit 2 from `heartbeat` (below).
 4. If `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` shows changes (new files included), stage and commit all of them on `BRANCH`: `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit -m "<id>: <headline>"`. If it is clean, `HEAD` is already the result.
 5. Complete it:
    ```bash
@@ -127,7 +127,7 @@ If `<HIVE>/inbox/<id>.json` has `"reviews"`, this is a review task: follow **Rev
    3. message the master with the same text: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/message.py" --hive "$HIVE" --from "$AGENT" --to orchestrator --type note --body "review <id> cannot build on <sha>: conflict"`, and go back to waiting.
 
    A resolution would land inside the review commit and could be stamped clean, so the master posts a rebase instead.
-3. Start the heartbeat loop in the background before you read the artifact, as ordinary step 3 above does: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT" --loop`. Stop it with the same command, `--stop` in place of `--loop`, before you `release` or `complete` this task, on every path. If it ended with exit 2 before you stopped it, handle it as an exit 2 from `heartbeat` (below).
+3. Start the heartbeat loop in the background before you read the artifact, as ordinary step 3 above does: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT" --loop`. Stop it with the same command, `--stop` in place of `--loop`, before you `release` or `complete` this task, on every path. Exit 1 from `--stop` means the loop has not exited within 60 seconds and may still be publishing: run `--stop` again, and make no hive write until it exits 0. If it ended with exit 2 before you stopped it, handle it as an exit 2 from `heartbeat` (below).
 4. Read the artifact at that sha, and write the review where the body says: a numbered section appended to the reviewed document, or the file it names for code.
 5. Edit nothing else.
 6. Stop the heartbeat loop, commit it as step 4 does, and complete with step 5's command, `--result-ref` included, plus `--verdict clean` or `--verdict findings`. The verdict is `clean` only when the review has no finding that needs a change. Exit 1 naming `--verdict` means the flag was wrong: the claim is still yours, so fix it and run `complete` again.

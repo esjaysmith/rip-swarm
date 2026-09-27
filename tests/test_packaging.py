@@ -392,8 +392,9 @@ class TestPackaging(unittest.TestCase):
                        "only this command or the loop's own publishes fetch and fast-forward it",
                        "exit 2 means the baton is gone, as section 2 says"):
             self.assertIn(needle, merge)
-        self.assertLess(merge.index(stop_then_beat), merge.index(beat_cmd))
-        self.assertLess(merge.index(beat_cmd), merge.index(rerun))
+        # Item 1 heartbeats too (Grok review 2, m1): look for item 2's after it.
+        beat_at = merge.index(beat_cmd, merge.index(stop_then_beat))
+        self.assertLess(beat_at, merge.index(rerun))
         self.assertLess(merge.index(rerun), merge.index(item3))
 
     def test_master_merge_arm_restarts_on_moved(self):
@@ -442,6 +443,46 @@ class TestPackaging(unittest.TestCase):
         merge = self._section(text, "6. **`merge`.**", "7. **`OUTCOME=dirty`**")
         self.assertIn("Stop the heartbeat loop before any hive write in this arm, on every path", merge)
         self.assertIn("items 4, 7 and 8 do not repeat it below, but it applies there too", merge)
+
+    def test_master_merge_arm_restarts_on_its_own_dirt(self):
+        # Grok review 2, M2: step 7's "run step 4 again" leads to ordinary
+        # step 9, which accepts A alone and leaves CHAIN unaccepted forever.
+        text = self._text("swarm-master")
+        item_7 = self._section(text, "7. **`OUTCOME=dirty`**", "8. **`OUTCOME=badsha`**")
+        for needle in ("stop the heartbeat loop, remove them and restart this merge arm from item 1",
+                       "as item 3 does on `MOVED:`",
+                       "Never follow step 7's own \"run step 4 again\"",
+                       "Otherwise report them to the operator and stop, as step 7 does",
+                       "**`OUTCOME=error`**: as step 8, with `T=<A>`"):
+            self.assertIn(needle, item_7)
+
+    def test_master_merge_arm_starts_the_loop_before_the_block(self):
+        # Grok review 2, m1: the loop start is a sentence above step 4's script,
+        # so "run step 4 (the OUTCOME= block)" left the check without a loop.
+        text = self._text("swarm-master")
+        item_1 = self._section(text, "   1. Heartbeat", "   2. **Passes:**")
+        beat = ('RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat '
+                '--hive "$HIVE" --task orchestrator --agent "$AGENT"')
+        for needle in (beat, "then start the heartbeat loop in the background (section 2)",
+                       "then run step 4's `OUTCOME=` block with `T=<A>` and `SHORT=<SHA>`",
+                       "The loop covers the block and the acceptance check"):
+            self.assertIn(needle, item_1)
+        self.assertLess(item_1.index(beat), item_1.index("then start the heartbeat loop"))
+        self.assertLess(item_1.index("then start the heartbeat loop"), item_1.index("`OUTCOME=` block"))
+        merge = self._section(text, "6. **`merge`.**", "7. **`OUTCOME=dirty`**")
+        self.assertIn("   1. Heartbeat", merge)
+
+    def test_role_skills_wait_for_a_stop_that_timed_out(self):
+        # Grok review 2, m2: exit 1 from `--stop` means the loop may still be
+        # publishing; the next hive write must wait for a later `--stop` exit 0.
+        rule = ("Exit 1 from `--stop` means the loop has not exited within 60 seconds and may still "
+                "be publishing: run `--stop` again, and make no hive write until it exits 0.")
+        master = self._text("swarm-master")
+        self.assertIn(rule, self._section(master, "**The heartbeat loop**", "**Exit 2 from the heartbeat"))
+        worker = self._text("swarm-worker")
+        self.assertIn(rule, self._section(worker, "3. Heartbeat before each long step", "4. If `WORKTREE="))
+        review = self._section(worker, "**Review tasks.**", "Never push a project branch")
+        self.assertIn(rule, self._section(review, "3. Start the heartbeat loop", "4. Read the artifact"))
 
     def test_readme_documents_install_and_roles(self):
         text = (REPO / "README.md").read_text(encoding="utf-8")

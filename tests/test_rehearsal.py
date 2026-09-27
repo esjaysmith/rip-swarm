@@ -396,20 +396,21 @@ class Master(Session):
         assert rc == 0, out
         return dict(field.split("=", 1) for field in out.split())
 
-    def chain_wake(self, task, *, check=None, judge=None, worth=True, wanted=()):
+    def chain_wake(self, task, *, check=None, judge=None, worth=True, wanted=(), leftovers=True):
         """/swarm-master *Review chains*: run reviews.py and act on NEXT, arm by arm.
 
         The model's calls: `check(wt)` is A's acceptance check on the merged tree,
         `judge(head)` says why a review head is too thin or contradicts its verdict
         (None: it is fine; no judge: every review is fine), `worth` is False for
-        *not worth pursuing*, and `wanted` is the set of A and its dependents whose
-        work is still wanted then (the reject handler's step 2).
+        *not worth pursuing*, `wanted` is the set of A and its dependents whose
+        work is still wanted then (the reject handler's step 2), and `leftovers`
+        says a dirty `WORKTREE` holds only leftovers of the master's own check.
         Returns what it did: `review <id>`, `revise <id>`, `rebase <id>`,
         `reject <id>`, `post <id>`, `refused <id>` (a replacement below the profile's
         floor, posted again), `accepted`, `short <id>`, `moved`, `restart`,
         or an OUTCOME (`dirty`, `error`)."""
         sync(self.hive)
-        arms = dict(check=check, judge=judge, worth=worth, wanted=wanted)
+        arms = dict(check=check, judge=judge, worth=worth, wanted=wanted, leftovers=leftovers)
         line = self.reviews(task)
         nxt, a, head = line["NEXT"], line["ARTIFACT"], line["HEAD"]
         title = self.inbox(a)["title"]
@@ -459,11 +460,12 @@ class Master(Session):
             return [f"revise {f}"]
         return self.merge_arm(a, line, **arms)                                     # arm 6
 
-    def merge_arm(self, a, line, *, check, judge=None, worth=True, wanted=()):
+    def merge_arm(self, a, line, *, check, judge=None, worth=True, wanted=(), leftovers=True):
         """*Review chains* arm 6: everything is about A; `<T>` is A throughout.
-        `line` is the reviews.py line that entered the arm. No heartbeat loop runs
-        here, so stopping it is a no-op."""
-        arms = dict(check=check, judge=judge, worth=worth, wanted=wanted)
+        `line` is the reviews.py line that entered the arm. Item 1's heartbeat and
+        loop start are not rehearsed (the clock is frozen, so the lease never runs
+        short), and stopping the loop is a no-op."""
+        arms = dict(check=check, judge=judge, worth=worth, wanted=wanted, leftovers=leftovers)
         title = self.inbox(a)["title"]
         outcome = self.review_block(a, line["SHA"])                                # 6.1
         if outcome == "conflict":                                                  # 6.4
@@ -474,7 +476,11 @@ class Master(Session):
             return [f"rebase {reb}"]
         if outcome == "badsha":                                                    # 6.8
             return self.reject_badsha(line["HEAD"])
-        if outcome != "merged":                                                    # 6.7
+        if outcome == "dirty" and leftovers:                                       # 6.7: its own dirt
+            git(self.wt, "reset", "-q", "--hard")                                  # remove it, then
+            git(self.wt, "clean", "-q", "-fd")                                     # restart from 6.1,
+            return ["restart", *self.merge_arm(a, line, **arms)]                   # never ordinary 9
+        if outcome != "merged":                                                    # 6.7: report, stop
             return [outcome]
         review = f"rip-swarm/review-{a}"
         if check(self.wt):
@@ -1222,6 +1228,32 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(self.m.tick(), Wake("message"))
         self.assertEqual(self.m.handle_messages(), [f"reject {r1}"])               # NEXT=reject-review
         self.assertEqual(self._rebases(a), [f])
+
+    def test_a_dirty_merge_restarts_the_arm_and_accepts_the_whole_chain(self):
+        # Grok review 2, M2: ordinary step 7's "run step 4 again" leads to
+        # step 9, which accepts A alone. The merge arm restarts at item 1.
+        for leftovers in (True, False):
+            with self.subTest(leftovers=leftovers):
+                self.tearDown()
+                self.setUp()
+                a = self._artifact(1)
+                self._write_artifact(a)
+                self.m.tick()
+                [r1] = self._ids(self.m.handle_complete(a, None), "review")
+                self.w2.review(r1, "clean", "\n## Review 1\nno findings\n")
+                self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} complete"))
+                (self.m.wt / "check.log").write_text("left by the last check\n", encoding="utf-8")
+                done = self.m.handle_complete(r1, lambda wt: True, leftovers=leftovers)
+                accepted = [(self.m.hive / "accepted" / f"{tid}.json").exists() for tid in (r1, a)]
+                if leftovers:
+                    self.assertEqual(done, ["restart", "accepted"])
+                    self.assertFalse((self.m.wt / "check.log").exists())
+                    self.assertEqual(accepted, [True, True])
+                    self.assertEqual(self.m.tick(), Wake("all-complete"))
+                else:                                                              # not ours: report
+                    self.assertEqual(done, ["dirty"])
+                    self.assertTrue((self.m.wt / "check.log").exists())
+                    self.assertEqual(accepted, [False, False])
 
     def test_rejecting_a_revise_runs_reviews_and_never_the_orphan_step(self):
         a = self._artifact(1)
