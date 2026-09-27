@@ -250,5 +250,135 @@ class TestNextStep(ChainCase):
         self.assertIn("is not a reviewed artifact", err)
 
 
+class TestIndependence(ChainCase):
+    def claim(self, tid, agent):
+        return try_claim(self.hive, tid, agent, HARNESS[agent], self.later(), 3600)
+
+    def test_an_author_is_refused_a_review(self):
+        a = self.artifact(2)
+        self.done(a, "alice")
+        r1 = self.post("Review 1", reviews=a)
+        with self.assertRaisesRegex(ClaimDenied, f"alice wrote part of {a}; "
+                                                 "its review must come from another agent"):
+            self.claim(r1, "alice")
+        self.done(r1, "bob", "findings")
+        self.fix(a, agent="carol")                                          # a third agent folds
+        r2 = self.post("Review 2", reviews=a)
+        with self.assertRaisesRegex(ClaimDenied, "carol wrote part of"):
+            self.claim(r2, "carol")                                         # and is an author now
+        self.claim(r2, "bob")
+
+    def test_a_reviewer_is_refused_a_fix_however_it_reviewed(self):
+        for how in ("completed", "released", "holds"):
+            with self.subTest(how=how):
+                self.tearDown()
+                self.setUp()
+                a = self.artifact(2)
+                self.done(a, "alice")
+                r = self.post("Review", reviews=a)
+                if how == "completed":
+                    self.done(r, "bob", "findings")
+                else:
+                    self.claim(r, "bob")
+                    if how == "released":
+                        release(self.hive, r, "bob", self.clock, note="cannot build")
+                f = self.post("Revise", fixes=a)
+                with self.assertRaisesRegex(ClaimDenied, f"bob reviewed {a}; "
+                                                         "its fixes must come from another agent"):
+                    self.claim(f, "bob")
+
+    def test_one_reviewer_may_do_every_round(self):
+        a = self.artifact(2)
+        self.done(a, "alice")
+        self.review(a, agent="bob", verdict="clean")
+        r2 = self.post("Review 2", reviews=a)
+        self.claim(r2, "bob")                                               # after its own clean review
+
+    def test_a_masters_reject_is_not_a_claim(self):
+        from rip_swarm.reviews import reviewers
+        a = self.artifact(1)
+        self.done(a, "alice")
+        r = self.post("Review", reviews=a)
+        master_reject(self.hive, agent="master", task_id=r, note="superseded", now=self.later())
+        self.assertEqual(reviewers(self.hive, read_board(self.hive, self.clock), a, self.clock), set())
+
+    def test_the_chain_of_a_rejected_artifact_is_closed(self):
+        a = self.artifact(1)
+        self.done(a, "alice")
+        r = self.post("Review", reviews=a)
+        master_reject(self.hive, agent="master", task_id=a, note="drop", now=self.later())
+        with self.assertRaisesRegex(ClaimDenied, f"{a} is rejected"):
+            self.claim(r, "bob")
+
+    def test_cli_refusal_exits_2(self):
+        a = self.artifact(1)
+        self.done(a, "alice")
+        r = self.post("Review", reviews=a)
+        rc, _, err = cli("claim", "--hive", self.hive, "--task", r, "--agent", "alice",
+                         "--local", at=self.later())
+        self.assertEqual(rc, 2)
+        self.assertIn("alice wrote part of", err)
+
+
+class TestAcceptReadiness(ChainCase):
+    def accept(self, tid, *via):
+        return accept_task(self.hive, agent="master", task_id=tid, integration_sha="0123abc",
+                           via=via, now=self.later())
+
+    def refused(self, a, n, k):
+        with self.assertRaisesRegex(ClaimDenied, f"{a} needs {n} review rounds ending clean, has {k}"):
+            self.accept(a)
+
+    def test_findings_last(self):
+        a = self.artifact(1)
+        self.done(a, "alice")
+        self.review(a, verdict="findings")
+        self.refused(a, 1, 1)
+
+    def test_clean_but_short(self):
+        a = self.artifact(2)
+        self.done(a, "alice")
+        self.review(a)
+        self.refused(a, 2, 1)
+
+    def test_clean_and_met(self):
+        a = self.artifact(2)
+        self.done(a, "alice")
+        r1, _ = self.review(a, verdict="findings")
+        f1, _ = self.fix(a)
+        r2, _ = self.review(a)
+        for tid in (r1, f1, r2):                                            # chain tasks: today's rules
+            self.accept(tid)
+        self.assertEqual(self.accept(a)["task_id"], a)
+
+    def test_a_fix_after_the_clean_review(self):
+        a = self.artifact(1)
+        self.done(a, "alice")
+        self.review(a)
+        self.fix(a)
+        self.refused(a, 1, 1)
+
+    def test_a_rejected_review_does_not_count(self):
+        a = self.artifact(1)
+        self.done(a, "alice")
+        r1, _ = self.review(a)
+        master_reject(self.hive, agent="master", task_id=r1, note="review rejected: thin",
+                      now=self.later())
+        self.refused(a, 1, 0)
+
+    def test_via_does_not_bypass_the_rounds(self):
+        a = self.artifact(1)
+        self.done(a, "alice")
+        f, _ = self.fix(a)
+        self.accept(f)
+        with self.assertRaisesRegex(ClaimDenied, f"{a} needs 1 review rounds ending clean, has 0"):
+            self.accept(a, f)
+
+    def test_zero_rounds_is_todays_path(self):
+        a = self.artifact(0)
+        self.done(a, "alice")
+        self.assertEqual(self.accept(a)["task_id"], a)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,6 +15,7 @@ from rip_swarm.inbox import InboxError, validate_task_id
 from rip_swarm.io import ExclExistsError, excl_create_json, read_json, write_json_to_new_path
 from rip_swarm.paths import HivePaths
 from rip_swarm.registry import require_agent
+from rip_swarm.reviews import chain_state
 from rip_swarm.timeutil import format_z
 
 _SHA = re.compile(r"[0-9a-f]{7,64}")
@@ -52,16 +53,27 @@ def accept_task(
 ) -> dict:
     """Write the create-only `accepted/<T>.json`. Idempotent: an existing record
     is `{"task_id": T, "already": True}` and nothing is written. A rejected task
-    is refused, `--via` or not: a reject is final (spec §7.4)."""
+    is refused, `--via` or not: a reject is final (spec §7.4). A reviewed
+    artifact (min_reviews >= 1) is refused until it is ready (execution
+    proposals §5.3)."""
     _require_task(hive, task_id)
     _require_master(hive, agent, now)
     if is_accepted(hive, task_id):
         return {"task_id": task_id, "already": True}
-    view = read_board(hive, now).get(task_id)
+    board = read_board(hive, now)
+    view = board.get(task_id)
     if view is None:                     # the board skips an inbox file it cannot parse
         raise ClaimDenied(f"inbox task {task_id} is unreadable")
     if view.rejected:
         raise ClaimDenied(f"{task_id} is rejected; it cannot be accepted")
+    if view.min_reviews >= 1:
+        # Execution proposals §5.5: `--via` does not bypass the rounds; the
+        # fixes walk ends at this refusal as it ends at a rejected task.
+        state = chain_state(hive, board, task_id)
+        if not state.ready:
+            raise ClaimDenied(
+                f"{task_id} needs {view.min_reviews} review rounds ending clean, has {state.rounds}"
+            )
     if not _SHA.fullmatch(integration_sha or ""):
         raise ValueError(f"--integration-sha must be a hex commit id, got {integration_sha!r}")
     via = list(dict.fromkeys(via))

@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 from rip_swarm.board import TaskView, Tombstone, artifact_of, chain, list_tombstones
+from rip_swarm.fold import Expired, Holder, active_holder
 
 VERDICTS = ("clean", "findings")
 _CANNOT_BUILD = re.compile(
@@ -176,3 +178,49 @@ def next_step(hive: Path, board: dict[str, TaskView], task_id: str) -> Step:
             return step("post-revise")
         return step("merge" if st.rounds >= art.min_reviews else "post-review")
     return step("post-review")
+
+
+def authors(
+    hive: Path,
+    board: dict[str, TaskView],
+    artifact_id: str,
+    stones: dict[str, list[Tombstone]] | None = None,
+) -> set[str]:
+    """§5.3: every agent that completed `A` or a fix of `A`."""
+    stones = tombstones_by_task(hive) if stones is None else stones
+    ids = [artifact_id, *(v.task_id for v in board.values() if v.fixes == artifact_id)]
+    out: set[str] = set()
+    for tid in ids:
+        for stone in stones.get(tid, []):
+            agent = (stone.doc() or {}).get("agent") if stone.action == "complete" else None
+            if isinstance(agent, str):
+                out.add(agent)
+    return out
+
+
+def reviewers(
+    hive: Path,
+    board: dict[str, TaskView],
+    artifact_id: str,
+    now: datetime,
+    stones: dict[str, list[Tombstone]] | None = None,
+) -> set[str]:
+    """§5.3: every agent that has claimed a review of `A`: it holds a claim on
+    one (live, or expired and not yet stolen) or has a tombstone on one. A
+    master's reject is not a claim: its tombstone carries `"action": "reject"`
+    and is skipped."""
+    stones = tombstones_by_task(hive) if stones is None else stones
+    out: set[str] = set()
+    for view in board.values():
+        if view.reviews != artifact_id:
+            continue
+        for stone in stones.get(view.task_id, []):
+            doc = stone.doc() or {}
+            if doc.get("action") == "reject":
+                continue
+            if isinstance(doc.get("agent"), str):
+                out.add(doc["agent"])
+        rec = active_holder(hive, view.task_id, now)
+        if isinstance(rec, (Holder, Expired)):
+            out.add(rec.agent)
+    return out
