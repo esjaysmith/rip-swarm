@@ -1,6 +1,6 @@
 # Execution proposals: cascade, heartbeat, result messages, minimum review rounds
 
-**Status:** proposal. §5 reviewed at `dc611ab` (§7): needs revision (2 critical, 5 major, 3 minor, 1 nit). Revision 2 folds §7 into §5 (dispositions in §8). §5 re-reviewed at `b74679a` (§9): needs revision (1 critical, 2 minor, 1 nit). Revision 3 folds §9 (dispositions in §10). Not folded into the roles-and-install spec or the skills.
+**Status:** proposal. §5 reviewed at `dc611ab` (§7): needs revision (2 critical, 5 major, 3 minor, 1 nit). Revision 2 folds §7 into §5 (dispositions in §8). §5 re-reviewed at `b74679a` (§9): needs revision (1 critical, 2 minor, 1 nit). Revision 3 folds §9 (dispositions in §10). §5 re-reviewed at `515ed0a` (§11): needs revision (1 major, 1 nit). Revision 4 folds §11 (dispositions in §12). Not folded into the roles-and-install spec or the skills.
 **Date:** 2026-09-26
 **Audience:** operator + implementer
 **Related:** `docs/specs/2026-09-26-roles-and-install.md` §7.2, §7.4, §8 step 6, §9; `docs/specs/2026-09-17-design-spec.md` §9 (`reviews_required_per_plan` stays advisory); `skills/swarm-master/SKILL.md`; `skills/swarm-worker/SKILL.md`; `rip_swarm/waiter.py` (`tick`), `rip_swarm/acceptance.py` (`accept_task`), `rip_swarm/inbox.py`.
@@ -85,7 +85,7 @@ Keep messages for questions, for a release or a conflict the master would not ot
 
 ## 5. Minimum independent review rounds per artifact kind
 
-**Status:** design agreed with the operator (2026-09-26). Revision 2 folds the review in §7 (dispositions in §8); revision 3 folds the second review in §9 (dispositions in §10). It replaces the earlier sketch of consecutive clean reviews.
+**Status:** design agreed with the operator (2026-09-26). Revision 2 folds the review in §7 (dispositions in §8); revision 3 folds the second review in §9 (dispositions in §10); revision 4 folds the third review in §11 (dispositions in §12). It replaces the earlier sketch of consecutive clean reviews.
 
 Today the master accepts a completed task after one judgment of its own. Nothing lets the operator say "a spec needs two independent reviews" in a way that a takeover master still sees and that the helpers enforce. With this section, every task the master marks as an artifact carries its number on the board, and no helper lets that number be lowered or its rounds skipped. Marking is the master's plan step: a task posted without `--kind` is not an artifact, and nothing forces one (§5.5). This section adds three things:
 - a number per artifact kind, stated once;
@@ -233,14 +233,16 @@ Because `NEXT=post-…` appears only while no chain task is open, a repeated wak
   - `done` or `wait`: nothing.
   - `post-review`: post `Review <k+1> of <title>` with `--reviews <A>`. The body names `SHA` and where the review goes (§5.3).
   - `post-revise`: post `Revise <title> after review <k>` with `--fixes <A>`. The body names `SHA` and the review's findings.
-  - `merge`:
-    1. Run `/swarm-master` §6 step 4, the `OUTCOME=` block, with `T=<A>` and `SHORT=<SHA>`. (That is the skill's §6, not this document's.) On `OUTCOME=merged` it stops with `WORKTREE` on the review branch. Run the master's acceptance check there, as in step 9.
-    2. On a pass, heartbeat and run `reviews.py --task <A>` again **before** step 9's fast-forward command (*Passes*, item 1). It must print `NEXT=merge` with the same `SHA`. Otherwise, return to `rip-swarm/integration`, delete the review branch, and act on the new `NEXT`.
-    3. Run the fast-forward command. In place of *Passes* items 2 and 3, accept each id in `CHAIN` in order, then `A`, all with `--integration-sha <NEW_TIP>`. If `accept` still refuses after the fast-forward, report it to the operator and stop. Do not reset integration: the skill never forces, and a worker may already have merged the new tip.
-    4. On a conflict, a shortfall or "not worth pursuing", follow today's steps, with every follow-up posted `--fixes <A>`.
+  - `merge`. This arm is entered from the wake of the clean head `R`, but everything it does is about `A`. **In every skill command below, `<T>` is `<A>`, not the woken task.** The review branch is `rip-swarm/review-<A>`, the `REVIEW=` value on the `OUTCOME=` line.
+    1. Run `/swarm-master` §6 step 4, the `OUTCOME=` block, with `T=<A>` and `SHORT=<SHA>`. (That is the skill's §6, not this document's.) On `OUTCOME=merged` it stops with `WORKTREE` on `rip-swarm/review-<A>`. Run the master's acceptance check there, as in step 9.
+    2. On a pass, heartbeat and run `reviews.py --task <A>` again **before** step 9's fast-forward command (*Passes*, item 1). It must print `NEXT=merge` with the same `SHA`. Otherwise, run the *Falls short* command with `T=<A>`: it switches to `rip-swarm/integration` first, then deletes `rip-swarm/review-<A>` with `git branch -D`, because the branch is unmerged. Then act on the new `NEXT`.
+    3. Run the *Passes* item 1 fast-forward command with `T=<A>` and the `TIP` from the `OUTCOME=` line. In place of *Passes* items 2 and 3, accept each id in `CHAIN` in order, then `A`, all with `--integration-sha <NEW_TIP>`. If `accept` still refuses after the fast-forward, report it to the operator and stop. Do not reset integration: the skill never forces, and a worker may already have merged the new tip.
+    4. **Conflict.** The block has already deleted `rip-swarm/review-<A>`. Post the rebase with `--fixes <A>`.
+    5. **Falls short.** Run the *Falls short* command with `T=<A>`, then post the follow-up with `--fixes <A>`, building on `SHA`.
+    6. **Not worth pursuing.** Run the *Falls short* command with `T=<A>`, then reject **`A`**, not the woken review. Its reject handler cascades over the chain (§5.5).
 - **A review that cannot build** (§5.7). It shows up in two places:
-  - as `wake task-finished <R> release`, whose note is `review cannot build on <sha>: conflict`. The skill's release handler, today "nothing required", gains this case;
-  - usually also as a message with the same text. `tick` reports messages first, so the message usually arrives first.
+  - as `wake task-finished <R> release`, whose note is `review <R> cannot build on <sha>: conflict`. The skill's release handler, today "nothing required", gains this case;
+  - usually also as a message with the same text, so it names `<R>` too. `tick` reports messages first, so the message usually arrives first, and neither arrival has to infer the review's id.
 
   Act on whichever arrives first, and again on the other. When `A` is live and `R` is not rejected yet:
   1. Post a rebase with `--fixes <A>`, unless the chain already has a fix of `A` that is neither completed nor rejected. Its body names the `<sha>` from the note, not a `SHA` from `reviews.py`, which is not run here: the released review is still open, so it would print `wait`. The body asks for that sha to be merged onto `rip-swarm/integration` and the conflict resolved. The rebase is a new head and costs another round.
@@ -259,7 +261,7 @@ A task whose inbox file has `reviews` is a review task:
 1. Build on the sha its body names. This is the same step-1 block that `fixes` tasks use.
 2. **If the block does not merge cleanly** (`SYNC=error`, or `BUILD=conflict` or `BUILD=error`):
    1. abort any merge in progress (`git -C "$WORKTREE" merge --abort`);
-   2. release the task with `--note "review cannot build on <sha>: conflict"`;
+   2. release the task with `--note "review <id> cannot build on <sha>: conflict"`, where `<id>` is this review task;
    3. message the master with the same text.
    
    A review never resolves a conflict: a resolution would land inside the review commit and could be stamped `clean`. The master posts a rebase (§5.6).
@@ -300,6 +302,7 @@ A worker's brief still does not travel to the hive; the task body is what tells 
   - a master that dies after rejecting a review posts the next round on the reject wake;
   - a review that cannot build releases, the rebase is posted on the sha from its note, and it costs another round. The release wake alone posts it, and the message plus the release together post it once;
   - `reviews.py` is checked again before the fast-forward;
+  - the pass, shortfall and "not worth pursuing" paths of `merge`, entered from a review's wake, fast-forward or delete `rip-swarm/review-<A>`, and the last one rejects `A`;
   - rejecting a reviewed artifact while one of its reviews is claimed: the review completes, the derived wake rejects it, and `all-complete` is reached;
   - N=0 is today's path.
 - **Packaging needles:**
@@ -482,3 +485,44 @@ Each finding was checked against revision 2's text before it was folded.
 | m1. The conflict rebase does not say which sha, and it is not on the release wake | Accepted. The release handler gains the case. The rebase builds on the sha in the release note. Whichever of the release and the message arrives first posts the rebase, unless an open fix of `A` exists, and then rejects the review. The second arrival does nothing. | §5.6, §5.9 |
 | m2. The opening still says a model slip cannot skip the rounds | Accepted. The opening says the floor binds the tasks the master marks, and that a task posted without `--kind` is not an artifact. | §5 opening |
 | n1. "§6 step 4" is not this document | Accepted. Step 1 is `/swarm-master` §6 step 4's `OUTCOME=` block, which stops on the review branch. The acceptance check runs there. The re-check runs before step 9's fast-forward command, and the chain accepts replace *Passes* items 2 and 3. | §5.6 `merge` |
+
+---
+
+## 11. Third review of §5 (2026-09-27) — `515ed0a`
+
+**Reviewed tip:** `515ed0a` on `feat/min-reviews`. §7 and §9 were not re-opened. (The operator pasted this review in chat; it is recorded here as given.)
+
+Revision 3 needs another pass. The role split, the release-note rebase, and the profile-floor wording hold. The merge arm still fast-forwards a review branch this section never creates.
+
+What holds: an author is refused every review, and a reviewer is refused every fix, including a reviewer who only released. One reviewer can take the next round, so two clean rounds and the rebase after a review that could not build both have a legal claimant. The rebase uses the sha from the release note, once, whichever of the release and the message arrives first. A task posted without --kind is not an artifact. Step 1 of merge is the skill's OUTCOME= block and stops on the review branch. The re-check is before the fast-forward, and a refusal after that is reported rather than reset.
+
+### Major
+
+#### M1. The pass path fast-forwards rip-swarm/review-<wake task>
+
+merge is entered from wake task-finished <R> complete, and R is the clean head, not A. Step 1 runs the OUTCOME= block with T=<A>, so the branch it creates is rip-swarm/review-<A>. That block is one shell. The skill says those variables do not survive, and the next command copies TIP and SHA from the OUTCOME= line, not the branch name.
+
+Step 3 runs Passes item 1. That command builds rip-swarm/review-$T from T. Filled in as the skill defines T, from the wake, that is rip-swarm/review-<R>, which was never created. merge --ff-only fails, the command prints FAILED, and the skill says to report and stop. Nothing accepts A, and nothing posts a wake that would try again.
+
+The shortfall delete and "not worth pursuing" use that same T. Falls short runs git branch -D on rip-swarm/review-<R> after switching to integration, so the delete fails and rip-swarm/review-<A> is left behind. "Not worth pursuing" then rejects the wake's task. That is the head review. reviews.py posts another round, and A stays. The re-check's "delete the review branch" does not name rip-swarm/review-<A> either, and an unmerged branch needs -D.
+
+The conflict path is fine: the OUTCOME= block deletes $REVIEW inside the shell where T=<A>.
+
+Fix. After the block, the branch is the REVIEW value from the OUTCOME= line, rip-swarm/review-<A>. The fast-forward, the shortfall delete, and the re-check delete all use that name. An unmerged branch is removed with git branch -D only after the worktree is back on rip-swarm/integration. "Not worth pursuing" rejects A and runs the artifact cascade.
+
+### Nit
+
+#### n1. The message that usually arrives first does not name the review
+
+The release wake carries <R>. The message is only the note, review cannot build on <sha>: conflict, and tick reports the message first. The procedure then says to reject R. The release wake still has the id, so a master who cannot find R from the note is saved by the second arrival. The arm that usually runs first should not have to infer the task.
+
+Fix. The message names the review task as well as the sha.
+
+---
+
+## 12. Dispositions (revision 4, 2026-09-27)
+
+| Finding | Disposition | Where |
+|---|---|---|
+| M1. The pass path fast-forwards `rip-swarm/review-<wake task>` | Accepted. The `merge` arm says that in every skill command it runs, `<T>` is `<A>`, not the woken review. The branch is `rip-swarm/review-<A>`, the `REVIEW=` value on the `OUTCOME=` line. The pass path runs *Passes* item 1 with `T=<A>`. The re-check failure and the shortfall run the *Falls short* command with `T=<A>`, which switches to integration before `git branch -D`. "Not worth pursuing" rejects `A`, and its reject handler cascades over the chain. The conflict path is unchanged. A rehearsal case covers the three paths entered from a review's wake. | §5.6 `merge`, §5.9 |
+| n1. The message that usually arrives first does not name the review | Accepted. The note and the message are `review <R> cannot build on <sha>: conflict`. | §5.6, §5.7 |
