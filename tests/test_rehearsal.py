@@ -13,7 +13,7 @@ from unittest import mock
 from hivekit import T0, git, make_project, remote_show
 from rip_swarm.board import artifact_of, chain, downstream, fixers, posting_order, read_board
 from rip_swarm.cli import main
-from rip_swarm.gitops import sync
+from rip_swarm.gitops import publish, sync
 from rip_swarm.join import join, leave
 from rip_swarm.state import load_state, save_state
 from rip_swarm.waiter import Wake, tick
@@ -47,15 +47,21 @@ class Session:
         return wake
 
     def post(self, title, *extra):
+        rc, out, err = self.try_post(title, *extra)
+        assert rc == 0, err or out
+        return out.split()[1].rstrip(":")
+
+    def try_post(self, title, *extra):
+        """`inbox-add` as the skills run it: (exit code, stdout, stderr)."""
         # Real posts and messages are seconds apart. On a frozen clock they would
         # share the ULID's millisecond, and its random part would pick the order:
         # the chain's posting order (created_at, then id: §5.3), or whether a
         # message sorts after the reader's cursor. So each one moves the clock.
         self.now += timedelta(milliseconds=1)
+        err = io.StringIO()
         rc, out = cli("inbox-add", "--hive", self.hive, "--created-by", self.agent,
-                      "--title", title, *extra, at=self.now)
-        assert rc == 0, out
-        return out.split()[1].rstrip(":")
+                      "--title", title, *extra, at=self.now, err=err)
+        return rc, out, err.getvalue()
 
     def send(self, to, body):
         self.now += timedelta(milliseconds=1)                                      # see `post`
@@ -316,11 +322,22 @@ class Master(Session):
                 extra += ["--body", inbox["body"]]
             if inbox.get("fixes"):
                 extra += ["--fixes", inbox["fixes"]]
-            if inbox.get("kind") is not None:                                      # copied, whatever
-                extra += ["--kind", inbox["kind"]]                                 # the profile says
+            kind, copy = inbox.get("kind"), []
+            if kind is not None:                                                   # copied, whatever
+                extra += ["--kind", kind]                                          # the profile says
             if inbox.get("min_reviews") is not None:
-                extra += ["--min-reviews", str(inbox["min_reviews"])]
-            replaced[old] = self.post(f"{board[old].title} (replaces {old})", *extra)
+                copy = ["--min-reviews", str(inbox["min_reviews"])]
+            title = f"{board[old].title} (replaces {old})"
+            rc, out, err = self.try_post(title, *extra, *copy)
+            if rc != 0 and kind is not None and re.search(
+                    rf"min_reviews for {re.escape(kind)} is at least \d+ \(profile\)", err):
+                # The exact-copy exception needs `old` rejected; this post came
+                # first. Posted again with `--kind` alone: the profile's number.
+                assert not board[old].rejected, err
+                done.append(f"refused {old}")
+                rc, out, err = self.try_post(title, *extra)
+            assert rc == 0, err or out
+            replaced[old] = out.split()[1].rstrip(":")
             done.append(f"post {replaced[old]}")
         return done
 
@@ -372,7 +389,8 @@ class Master(Session):
         *not worth pursuing*, and `wanted` is the set of A and its dependents whose
         work is still wanted then (the reject handler's step 2).
         Returns what it did: `review <id>`, `revise <id>`, `rebase <id>`,
-        `reject <id>`, `post <id>`, `accepted`, `short <id>`, `moved`, `restart`,
+        `reject <id>`, `post <id>`, `refused <id>` (a replacement below the profile's
+        floor, posted again), `accepted`, `short <id>`, `moved`, `restart`,
         or an OUTCOME (`dirty`, `error`)."""
         sync(self.hive)
         arms = dict(check=check, judge=judge, worth=worth, wanted=wanted)
@@ -1087,6 +1105,40 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(self.m.handle_complete(a, lambda wt: True), "pass")
         self.assertEqual(len(list((self.m.hive / "inbox").glob("task_*.json"))), 1)
         self.assertEqual(self.m.tick(), Wake("all-complete"))
+
+    def _raise_floor(self, kind, n):
+        """The operator raises a kind's profile floor after the plan was posted.
+        It lands as any hive write does: one allowlisted publish, here from the
+        master's clone, so every helper reads it after its next fetch."""
+        path = self.m.hive / "profiles" / "default.yaml"
+
+        def op():
+            text = path.read_text(encoding="utf-8")
+            assert f"  {kind}: 0\n" in text, text
+            path.write_text(text.replace(f"  {kind}: 0\n", f"  {kind}: {n}\n"), encoding="utf-8")
+            return {}
+
+        publish(self.m.hive, task_id="__none__", op=op, message=f"profile: min_reviews {kind} {n}",
+                agent=self.m.agent, now=self.m.now, allow=["profiles/default.yaml"])
+
+    def test_a_replacement_refused_below_a_raised_floor_takes_the_profiles_number(self):
+        a = self._artifact(1)                                                      # under spec: 0
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nno findings\n")
+        self.m.tick()
+        self._raise_floor("spec", 2)
+        done = self.m.handle_complete(r1, lambda wt: False, worth=False, wanted={a})
+        [a2] = self.m.replacements(a)
+        # The exact copy (1) is refused while A is not yet rejected; the post
+        # again with `--kind spec` alone takes the profile's 2.
+        self.assertEqual(done, [f"refused {a}", f"post {a2}", f"reject {a}"])
+        doc = self.m.inbox(a2)
+        self.assertEqual((doc["kind"], doc["min_reviews"], doc["body"]), ("spec", 2, "Write spec.md"))
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} reject"))
+        self.assertEqual(self.m.handle_reject(a, wanted={a}), [f"reject {r1}"])
+        self.assertEqual(self.m.replacements(a), [a2])                             # none posted again
 
 
 if __name__ == "__main__":

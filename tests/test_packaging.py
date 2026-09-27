@@ -370,6 +370,22 @@ class TestPackaging(unittest.TestCase):
         self.assertLess(merge.index(run_step_2), merge.index(reject_a))
         self.assertLess(merge.index(dependents), merge.index(reject_a))
 
+    def test_master_replacement_refused_below_the_floor_takes_the_profile(self):
+        # Controller ruling (Task 10): inbox-add's exact-copy exception needs the
+        # original rejected, but step 2 posts a dependent's replacement, and
+        # merge item 6 A's, before that reject; a floor refusal falls back to
+        # `--kind` alone, as section 4 does for a plan post.
+        text = self._text("swarm-master")
+        reject = self._section(text, "### `wake task-finished <T> reject`", "### Other wakes")
+        step_2 = self._section(reject, "2. **Replacements**", "3. **Orphaned original.**")
+        for needle in ("a replacement posted before its original is rejected",
+                       "`A` under *Review chains*, `merge` item 6",
+                       "that is refused with `min_reviews for <kind> is at least <n> (profile)` "
+                       "is posted again with `--kind <kind>` alone, which takes the profile's number"):
+            self.assertIn(needle, step_2)
+        self.assertLess(step_2.index("its `--kind` and `--min-reviews`"),
+                        step_2.index("is posted again with `--kind <kind>` alone"))
+
     def test_master_merge_arm_stops_the_loop_on_every_path(self):
         # Fix round 1, F5: every hive write in the merge arm is preceded by
         # stopping the heartbeat loop, stated once in the preamble.
