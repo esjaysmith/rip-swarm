@@ -113,8 +113,8 @@ class TestCascadeCli(unittest.TestCase):
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
-        self.origin, repo = make_project(Path(self.tmp.name))
-        self.m = join(repo, role="master", harness="grok", now=T0)
+        self.origin, self.repo = make_project(Path(self.tmp.name))
+        self.m = join(self.repo, role="master", harness="grok", now=T0)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -166,3 +166,25 @@ class TestCascadeCli(unittest.TestCase):
         rc, _, err = self.reject(t, "--cascade", "--note", "x")
         self.assertEqual(rc, 1)
         self.assertIn("--cascade writes its own note", err)
+
+    def test_a_chain_cascade_is_one_commit_under_the_widened_allowlist(self):
+        w = join(self.repo, role="worker", harness="claude-code", now=T0)
+        a = self.post("Spec", "--kind", "spec", "--min-reviews", "1")
+
+        def as_worker(*argv):
+            rc, out, err = cli(*argv[:1], "--hive", w.hive, *argv[1:], "--agent", w.agent)
+            self.assertEqual(rc, 0, err)
+            return out
+
+        as_worker("claim", "--task", a)
+        as_worker("complete", "--task", a, "--result-ref", f"rip-swarm/{w.agent}@abc1234")
+        r = self.post("Review 1 of Spec", "--reviews", a)
+        f = self.post("Revise Spec", "--fixes", a)
+        d = self.post("Plan", "--after", a)
+        self.assertEqual(self.reject(a, "--note", "not worth pursuing")[0], 0)
+        before = self.commits()
+        rc, out, err = self.reject(a, "--cascade")
+        self.assertEqual(rc, 0, err)
+        self.assertEqual(sorted(out.splitlines()),
+                         sorted([f"rejected {r}", f"rejected {f}", f"rejected {d}"]))
+        self.assertEqual(self.commits(), before + 1)

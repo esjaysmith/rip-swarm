@@ -186,16 +186,25 @@ def chain(board: dict[str, TaskView], artifact_id: str) -> list[TaskView]:
 def downstream(board: dict[str, TaskView], root: str) -> list[tuple[str, str | None]]:
     """Every task a reject of `root` cascades to: the tasks that wait on it
     through `after`, directly or further down, including a task that waits on
-    several tasks of the walk (execution proposals §2). Level by level, sorted
-    within a level. The second item names the artifact whose review chain the
-    task is in; it is None for an `after` dependent."""
+    several tasks of the walk (execution proposals §2), and the review chain of
+    every reviewed artifact on the way (§5.5). Level by level, sorted within a
+    level. The second item names the artifact whose chain the task is in; it is
+    None for an `after` dependent."""
     seen, out, frontier = {root}, [], [root]
     while frontier:
-        level = sorted(tid for tid, view in board.items()
-                       if tid not in seen and any(dep in seen for dep in view.after))
-        out.extend((tid, None) for tid in level)
-        seen.update(level)
-        frontier = level
+        level: dict[str, str | None] = {}
+        for tid in frontier:
+            if tid in board and board[tid].min_reviews >= 1:
+                for view in chain(board, tid):
+                    if view.task_id not in seen:
+                        level.setdefault(view.task_id, tid)
+        for tid, view in board.items():
+            if tid not in seen and any(dep in seen for dep in view.after):
+                level.setdefault(tid, None)
+        ordered = sorted(level)
+        out.extend((tid, level[tid]) for tid in ordered)
+        seen.update(ordered)
+        frontier = ordered
     return out
 
 

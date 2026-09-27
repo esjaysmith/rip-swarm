@@ -380,5 +380,59 @@ class TestAcceptReadiness(ChainCase):
         self.assertEqual(self.accept(a)["task_id"], a)
 
 
+class TestChainCascade(ChainCase):
+    def test_the_cascade_rejects_the_chain_and_skips_a_live_claim(self):
+        from rip_swarm.acceptance import cascade_reject
+        a = self.artifact(2)
+        self.done(a, "alice")
+        r1, _ = self.review(a, verdict="findings")
+        f1, _ = self.fix(a)
+        r2 = self.post("Review 2", reviews=a)
+        try_claim(self.hive, r2, "bob", "grok", self.later(), 3600)          # held at the reject
+        d = self.post("Plan", after=[a])
+        master_reject(self.hive, agent="master", task_id=a, note="not worth pursuing",
+                      now=self.later())
+        doc = cascade_reject(self.hive, agent="master", task_id=a, now=self.clock)
+        self.assertEqual(sorted(doc["rejected"]), sorted([r1, f1, d]))
+        [skip] = doc["skipped"]
+        self.assertEqual((skip["task_id"], skip["agent"], skip["chain_of"]), (r2, "bob", a))
+        from rip_swarm.cli import _cascade_lines
+        self.assertIn(f"skipped {r2} (chain of {a}) held by bob until ", _cascade_lines(doc))
+
+    def test_the_derived_wake_waits_for_a_live_claim(self):
+        from rip_swarm.acceptance import cascade_reject
+        from rip_swarm.state import seed_state
+        from rip_swarm.waiter import Wake, tick
+        a = self.artifact(1)
+        self.done(a, "alice")
+        r = self.post("Review", reviews=a)
+        try_claim(self.hive, r, "bob", "grok", self.later(), 3600)
+        state = seed_state(self.hive, "master")                             # A's complete is unseen
+        wake = lambda: tick(self.hive, "master", state, self.clock, idle_after=600)
+        master_reject(self.hive, agent="master", task_id=a, note="drop", now=self.later())
+        self.assertEqual(wake(), Wake("task-finished", f"{a} complete"))    # its bare complete
+        self.assertEqual(wake(), Wake("task-finished", f"{a} reject"))      # the tombstone
+        self.assertIsNone(wake())                                           # silent: r is held
+        complete(self.hive, r, "bob", self.later(), "rip-swarm/bob@abc1234", verdict="clean")
+        self.assertEqual(wake(), Wake("task-finished", f"{r} complete"))
+        self.assertEqual(wake(), Wake("task-finished", f"{a} reject"))      # derived, recurs
+        self.assertEqual(wake(), Wake("task-finished", f"{a} reject"))
+        cascade_reject(self.hive, agent="master", task_id=a, now=self.clock)
+        self.assertEqual(wake(), Wake("task-finished", f"{r} reject"))
+        self.assertEqual(wake(), Wake("all-complete"))
+
+    def test_status_shows_kind_and_rounds(self):
+        from rip_swarm.status import format_status, status_report
+        a = self.artifact(2)
+        self.done(a, "alice")
+        r1, _ = self.review(a, verdict="clean")
+        r2 = self.post("Review 2", reviews=a)
+        plain = self.post("Plain", kind="plan")                             # a kind, zero rounds
+        text = format_status(status_report(self.hive, self.clock))
+        self.assertIn(f"{a} Spec (spec, reviews 1/2)", text)
+        self.assertIn(f"{r2} Review 2 (reviews {a})", text)
+        self.assertIn(f"{plain} Plain (plan)", text)
+
+
 if __name__ == "__main__":
     unittest.main()
