@@ -4,7 +4,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
+import time
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +31,9 @@ from rip_swarm.inbox import create_task
 from rip_swarm.outbox import write_message
 from rip_swarm.init_hive import init_hive
 from rip_swarm.join import join, leave
+from rip_swarm.lease import (
+    LoopRunning, acquire_loop_lock, heartbeat_loop, lease_ttl, release_loop_lock, stop_loop,
+)
 from rip_swarm.lookback import write_lookback
 from rip_swarm.messages import format_messages, list_messages, unread_messages
 from rip_swarm.orchestrator import heartbeat_orchestrator, promote, release_orchestrator
@@ -47,6 +52,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = _dispatch(args)
     except WaitRunning as e:
+        print(e, file=sys.stderr)
+        return 3
+    except LoopRunning as e:
         print(e, file=sys.stderr)
         return 3
     except ClaimDenied as e:
@@ -105,6 +113,10 @@ def _parser() -> argparse.ArgumentParser:
 
     hb_p = sub.add_parser("heartbeat", parents=[common], help="extend a held claim")
     hb_p.add_argument("--task", required=True)
+    hb_p.add_argument("--loop", action="store_true",
+                      help="heartbeat each time half the lease is gone, until stopped")
+    hb_p.add_argument("--stop", action="store_true",
+                      help="stop the running --loop for --task in this hive clone")
 
     complete_p = sub.add_parser("complete", parents=[common], help="complete a held claim")
     complete_p.add_argument("--task", required=True)
@@ -233,6 +245,10 @@ def _dispatch(args: argparse.Namespace) -> object:
     if args.command == "claim":
         return _claim(args, hive, now, profile)
     if args.command == "heartbeat":
+        if args.stop:
+            return stop_loop(hive, _require(args.task, "--task"))
+        if args.loop:
+            return _heartbeat_loop(args, hive, profile)
         return _heartbeat(args, hive, now, profile)
     if args.command == "promote":
         return _promote(args, hive, now, profile)
@@ -483,6 +499,27 @@ def _heartbeat(args: argparse.Namespace, hive: Path, now: datetime, profile: dic
         agent=agent,
         now=now,
     )
+
+
+def _heartbeat_loop(args: argparse.Namespace, hive: Path, profile: dict) -> None:
+    """Execution proposals §3: the lease length comes from the profile, never
+    from the skill's prose. SIGTERM (from --stop) ends the loop with exit 0
+    and removes its pid file; a lost lease ends it with exit 2."""
+    task_id = _require(args.task, "--task")
+    agent = _require(args.agent, "--agent")
+    _resolve_harness(hive, agent, args.harness)
+    lock = acquire_loop_lock(hive, task_id)
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        heartbeat_loop(
+            hive, task_id, agent, ttl=lease_ttl(profile, task_id),
+            beat=lambda at: _summary(args, _heartbeat(args, hive, at, profile)),
+            clock=now_utc, sleep=time.sleep,
+            out=lambda line: print(line, flush=True),
+            err=lambda line: print(line, file=sys.stderr, flush=True),
+        )
+    finally:
+        release_loop_lock(lock)
 
 
 def _complete(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
