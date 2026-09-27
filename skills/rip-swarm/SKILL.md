@@ -79,10 +79,10 @@ python3 "$SKILL_DIR/scripts/reviews.py" --hive "$HIVE" --task ID
 Rules for tasks and claims:
 
 - `--after` targets must already exist. A task stays blocked until every one of them is **accepted**, not merely completed.
-- `--fixes` links a follow-up or rebase task to the task it repairs.
+- `--fixes` links a follow-up or rebase task to the task it repairs. It takes no `--kind` or `--min-reviews` (exit 1).
 - `claim` exits 2 when the task is not yours: held by someone else, blocked, completed, rejected or accepted. If the message says *retry*, re-run the claim once.
 - Do not edit the project until `claim` prints `claimed … until …`.
-- Heartbeat at or before half the lease. `heartbeat --loop` does it for you while you work outside `wait`: it reads the lease from the profile, heartbeats each time half of it is gone, and runs until `heartbeat --stop` for the same task. `--stop` lets a heartbeat in progress finish and returns once the loop has exited; exit 1 means it did not exit within 60 seconds. A second loop for the same task exits 3. The loop exits 2 when the lease is gone.
+- Heartbeat at or before half the lease. `heartbeat --loop` does it for you while you work outside `wait`: it reads the lease from the profile, heartbeats each time half of it is gone, and runs until `heartbeat --stop` for the same task. `--stop` lets a heartbeat in progress finish and returns once the loop has exited; exit 1 means it did not exit within 60 seconds. A second loop for the same task exits 3. The loop exits 2 when the lease is gone. It exits 0, with a line saying so, when the session that started it is gone (its parent processes changed), so a dead session never holds a lease forever; it notices within 30 seconds. A loop that still outlives its session (a new master is refused while it holds the baton) is stopped from that agent's hive clone: `claim.py heartbeat --hive "$HIVE" --task ID --agent AGENT --stop`.
 - `reject` by the baton holder drops a task that has no live claim. Workers may reject only what they hold.
 - `reject --cascade` (baton holder, once `ID` is rejected) rejects every task that waits on `ID` through `after`, directly or further down, in one publish, with the note `dependency ID rejected`. It prints `rejected <id>`, `already rejected <id>` or `skipped <id> held by <agent> until <time>` per task. It refuses `--note`.
 - `accept` is master-only and idempotent: a second call prints `already accepted`. It refuses a rejected task with exit 2.
@@ -93,8 +93,9 @@ Review rounds (a reviewed artifact has `min_reviews` of 1 or more):
 - `--reviews A` posts a review task of artifact `A`. It takes no `--fixes`, `--kind` or `--min-reviews`. Revise, rebase and follow-up tasks of `A` use `--fixes A`.
 - A review task completes with `--verdict clean|findings`, and no other task takes one (exit 1 either way; nothing is written).
 - `claim` refuses a review of `A` to anyone who completed `A` or a fix of it, a fix of `A` to anyone who claimed a review of it, and any chain task of a rejected `A`.
-- `accept` refuses `A` until it has `min_reviews` rounds and its latest chain result is a clean review. `--via` does not bypass this.
-- `reviews.py` prints the chain's next step: `NEXT=… ARTIFACT=A ROUNDS=k/N HEAD=… SHA=… CHAIN=… [REVIEW=…]`, or exits 1.
+- `inbox.py` refuses `--fixes A` and `--reviews A` once `A` is accepted or rejected (`A is accepted; post a new task instead`, exit 1): such a task would never be accepted. Post a new task instead.
+- `accept` refuses `A` until it has `min_reviews` rounds and its latest chain result is a clean review, and while a chain task is still open, claimed or blocked (`A has chain work in progress: <id>`). `--via` does not bypass this.
+- `reviews.py` prints the chain's next step: `NEXT=… ARTIFACT=A ROUNDS=k/N HEAD=… SHA=… CHAIN=… [REVIEW=…]`, or exits 1. `NEXT=done` for an accepted or rejected `A` means there is nothing left to do in its chain. Exit 1 on a live chain (a head with no verdict, or whose `result_ref` has no hex sha) means the board was edited by hand: report it.
 - `reject --cascade` of a reviewed artifact also rejects its chain. A held chain task prints `skipped <id> (chain of <A>) held by <agent> until <time>`.
 
 ## Promote, lookback

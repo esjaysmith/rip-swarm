@@ -33,7 +33,7 @@ from rip_swarm.init_hive import init_hive
 from rip_swarm.join import join, leave
 from rip_swarm.lease import (
     LoopRunning, LoopStop, acquire_loop_lock, heartbeat_loop, lease_ttl, release_loop_lock,
-    stop_loop,
+    session_ancestry, stop_loop,
 )
 from rip_swarm.lookback import write_lookback
 from rip_swarm.messages import format_messages, list_messages, unread_messages
@@ -535,7 +535,9 @@ def _heartbeat_loop(args: argparse.Namespace, hive: Path, profile: dict) -> None
     """Execution proposals §3: the lease length comes from the profile, never
     from the skill's prose. SIGTERM (from --stop) ends the loop with exit 0
     and removes its pid file, after the beat in progress if there is one; a
-    lost lease ends it with exit 2."""
+    lost lease ends it with exit 2. A loop whose session died (it was
+    reparented) ends with exit 0 and a line saying so, so a dead session
+    never holds a lease forever."""
     task_id = _require(args.task, "--task")
     agent = _require(args.agent, "--agent")
     _resolve_harness(hive, agent, args.harness)
@@ -549,7 +551,7 @@ def _heartbeat_loop(args: argparse.Namespace, hive: Path, profile: dict) -> None
             clock=now_utc, sleep=time.sleep,
             out=lambda line: print(line, flush=True),
             err=lambda line: print(line, file=sys.stderr, flush=True),
-            stop=stop,
+            stop=stop, parent=session_ancestry,
         )
     finally:
         release_loop_lock(lock)

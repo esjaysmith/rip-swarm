@@ -16,6 +16,7 @@ from rip_swarm.timeutil import parse_duration
 
 RETRY_SECONDS = 30
 STOP_TIMEOUT = 60.0
+PARENT_CHECK_SECONDS = 30
 
 
 class LoopRunning(Exception):
@@ -48,6 +49,25 @@ class LoopStop:
             raise SystemExit(0)
 
 
+def session_ancestry() -> tuple[int, ...]:
+    """The pids from this process's parent up to init: who started the loop.
+
+    A harness usually runs a background command through a shell of its own
+    (`bash -c …`), and that shell outlives a harness that is killed hard, so
+    the direct parent alone would never change. The shell is reparented, so
+    the chain above it does. Without /proc (not Linux) this is the parent
+    alone. A process that is gone mid-walk ends the chain early, which is a
+    change too."""
+    chain = [os.getppid()]
+    while chain[-1] > 1 and len(chain) < 64:
+        try:
+            stat = Path(f"/proc/{chain[-1]}/stat").read_text(encoding="utf-8")
+            chain.append(int(stat.rpartition(")")[2].split()[1]))
+        except (OSError, ValueError, IndexError):
+            break
+    return tuple(chain)
+
+
 def lease_ttl(profile: dict, task_id: str) -> int:
     key = "orchestrator_lease_ttl" if task_id == "orchestrator" else "worker_lease_ttl"
     return parse_duration(profile[key])
@@ -66,6 +86,7 @@ def heartbeat_loop(
     err: Callable[[str], None],
     max_beats: int | None = None,
     stop: LoopStop | None = None,
+    parent: Callable[[], object] | None = None,
 ) -> None:
     """Heartbeat `task_id` each time half of its lease is gone, until killed.
 
@@ -74,16 +95,26 @@ def heartbeat_loop(
     ends the loop. Any other failure, such as a push that did not go through,
     is printed and retried after RETRY_SECONDS while the lease is still alive.
     `stop`, when given, is the SIGTERM handler: a stop that arrives during a
-    beat ends the loop after that beat. `max_beats` bounds the loop for tests
+    beat ends the loop after that beat. `parent`, when given, names who
+    started the loop (`session_ancestry`): it is read at the start and on
+    every wake-up, and once it differs the session that started the loop is
+    gone, so the loop ends with a line saying so rather than keep the lease
+    alive for nobody. Sleeps are then at most PARENT_CHECK_SECONDS long, so
+    that is noticed within a minute. `max_beats` bounds the loop for tests
     only."""
+    origin = parent() if parent is not None else None
     beats = 0
     while max_beats is None or beats < max_beats:
+        if parent is not None and parent() != origin:
+            out(f"heartbeat loop for {task_id} ended: the session that started it is gone "
+                "(its parent process changed); the lease now runs out on its own")
+            return
         now = clock()
         rec = active_holder(hive, task_id, now)
         if isinstance(rec, Holder) and rec.agent == agent:
             wait = (rec.expires_at - now).total_seconds() - ttl / 2
             if wait > 0:
-                sleep(wait)
+                sleep(wait if parent is None else min(wait, PARENT_CHECK_SECONDS))
                 continue
         if stop is not None:
             stop.in_beat = True

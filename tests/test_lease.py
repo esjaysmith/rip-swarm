@@ -18,8 +18,8 @@ from rip_swarm.cli import main
 from rip_swarm.gitops import GitopsError
 from rip_swarm.inbox import create_task
 from rip_swarm.lease import (
-    LoopRunning, LoopStop, LoopStopTimeout, acquire_loop_lock, heartbeat_loop, lease_ttl,
-    release_loop_lock, stop_loop,
+    PARENT_CHECK_SECONDS, LoopRunning, LoopStop, LoopStopTimeout, acquire_loop_lock,
+    heartbeat_loop, lease_ttl, release_loop_lock, session_ancestry, stop_loop,
 )
 from rip_swarm.state import state_dir
 from rip_swarm.timeutil import now_utc
@@ -94,6 +94,36 @@ class TestHeartbeatLoop(unittest.TestCase):
         self.assertEqual(clock.slept, [30])
         self.assertEqual(self.beats, [T0 + timedelta(seconds=1030)])
         self.assertIn("push rejected", self.errors[0])
+
+    def test_a_loop_whose_session_is_gone_ends(self):
+        """Final review I2: a loop reparented because its session died would
+        keep the lease alive forever. It checks its parent on every wake-up,
+        sleeps at most PARENT_CHECK_SECONDS at a time, and ends with a line
+        saying why."""
+        clock, parents = Clock(T0), iter([100, 100, 100, 100, 1])
+        heartbeat_loop(self.hive, self.tid, "bob", ttl=1800, beat=self.beat, clock=clock,
+                       sleep=clock.sleep, out=self.lines.append, err=self.errors.append,
+                       parent=lambda: next(parents))
+        self.assertEqual(clock.slept, [PARENT_CHECK_SECONDS] * 3)
+        self.assertEqual(self.beats, [])
+        self.assertEqual(self.lines, [f"heartbeat loop for {self.tid} ended: the session that "
+                                      "started it is gone (its parent process changed); "
+                                      "the lease now runs out on its own"])
+
+    def test_a_watched_loop_sleeps_in_slices_until_the_beat_is_due(self):
+        clock = Clock(T0)
+        heartbeat_loop(self.hive, self.tid, "bob", ttl=1800, beat=self.beat, clock=clock,
+                       sleep=clock.sleep, out=self.lines.append, err=self.errors.append,
+                       parent=lambda: 100, max_beats=1)
+        self.assertLessEqual(max(clock.slept), 30)
+        self.assertEqual(sum(clock.slept), 900)
+        self.assertEqual(self.beats, [T0 + timedelta(seconds=900)])
+
+    def test_session_ancestry_starts_at_the_parent(self):
+        chain = session_ancestry()
+        self.assertEqual(chain[0], os.getppid())
+        if Path("/proc/self/stat").exists():
+            self.assertIn(chain[-1], (0, 1))                   # up to init
 
     def test_a_second_loop_is_refused(self):
         lock = acquire_loop_lock(self.hive, self.tid)
@@ -298,6 +328,58 @@ class TestHeartbeatLoopCli(unittest.TestCase):
             if proc.poll() is None:
                 proc.kill()
             proc.communicate()
+
+    def test_a_loop_ends_when_the_session_that_started_it_dies(self):
+        """Final review I2, end to end: a harness runs the loop through a shell
+        of its own, and that shell outlives the harness when it is killed
+        hard. The loop still notices (its ancestry changed), releases its
+        lock and exits 0."""
+        if not Path("/proc/self/stat").exists():
+            self.skipTest("needs /proc")
+        tid = create_task(self.hive, title="u", created_by="op", now=T0)["id"]
+        try_claim(self.hive, tid, "bob", "grok", now_utc(), 3600)   # no beat due for 30 min
+        work = Path(self.tmp.name)
+        loop = (
+            "import sys\n"
+            "import rip_swarm.lease as lease\n"
+            "lease.PARENT_CHECK_SECONDS = 0.1\n"
+            "import rip_swarm.cli as cli\n"
+            "sys.exit(cli.main(sys.argv[1:]))\n"
+        )
+        shell = (f"{sys.executable} -c '{loop}' heartbeat --hive '{self.hive}' --task {tid} "
+                 f"--agent bob --loop --local >'{work}/out' 2>&1; echo $? >'{work}/rc'")
+        session = ("import subprocess, sys, time\n"
+                   "subprocess.Popen(['/bin/sh', '-c', sys.argv[1]])\n"
+                   "time.sleep(60)\n")
+        env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1] / "skills" / "rip-swarm"))
+        harness = subprocess.Popen([sys.executable, "-c", session, shell], env=env,
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        pid_file = state_dir(self.hive) / f"rip-swarm-heartbeat-{tid}.pid"
+        try:
+            deadline = time.monotonic() + 20
+            while not pid_file.exists():
+                self.assertLess(time.monotonic(), deadline, "the loop never started")
+                time.sleep(0.05)
+            time.sleep(0.5)                                    # it has recorded its session
+            self.assertFalse((work / "rc").exists())           # still running
+            harness.kill()                                     # the session dies hard
+            harness.wait()
+            while not (work / "rc").exists():
+                self.assertLess(time.monotonic(), deadline + 20, "the loop kept running")
+                time.sleep(0.05)
+            time.sleep(0.2)
+            self.assertEqual((work / "rc").read_text().strip(), "0")
+            self.assertIn(f"heartbeat loop for {tid} ended: the session that started it is gone",
+                          (work / "out").read_text())
+            self.assertFalse(pid_file.exists())
+        finally:
+            if harness.poll() is None:
+                harness.kill()
+                harness.wait()
+            try:                                               # never leak a loop on failure
+                os.kill(int(pid_file.read_text(encoding="utf-8")), signal.SIGKILL)
+            except (OSError, ValueError):
+                pass
 
     def test_stop_with_nothing_running(self):
         rc, out, _ = self.run_cli("heartbeat", "--hive", self.hive, "--task", self.tid,

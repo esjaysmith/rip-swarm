@@ -59,6 +59,16 @@ The full reference is in [skills/rip-swarm/SKILL.md](skills/rip-swarm/SKILL.md).
 
 Exit codes: `0` ok, `1` failure, `2` refused (not yours, blocked, finished, or another master), `3` a `wait` is already running for this agent.
 
+## A stuck heartbeat loop
+
+`claim.py heartbeat --loop` keeps a lease alive while an agent works outside `wait`. It ends when it is stopped, when the lease is gone, or when the session that started it dies: it checks its parent processes every 30 seconds and exits 0 with a line saying why once they change. If a loop still outlives its session, for example on a system without `/proc` where only the direct parent is checked, the lease never expires, and a new master is refused while it holds the baton. Stop it from that agent's hive clone:
+
+```bash
+python3 skills/rip-swarm/scripts/claim.py heartbeat --hive <that agent's hive clone> --task <id or orchestrator> --agent <agent> --stop
+```
+
+The lease then runs out on its own, or the next heartbeat of a live session renews it.
+
 ## Hives created before 0.3
 
 A master needs `op` in `agents/registry.yaml` and in `profiles/default.yaml` `operators`. Hives bootstrapped by 0.3 have both. `join --role master` prints the two-line edit to publish when they are missing.
