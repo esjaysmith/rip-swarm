@@ -3814,3 +3814,56 @@ Fix: require the task id in the command line as well as `--loop`.
 | m1. The chain merge cites the outcome block and not the loop that has to cover the check | Accepted, fixed. Merge item 1 now says: heartbeat (the full command), then start the heartbeat loop in the background (section 2), then run step 4's `OUTCOME=` block; the loop covers the block and the acceptance check. | `5f94921`; `skills/swarm-master/SKILL.md`; needle `test_master_merge_arm_starts_the_loop_before_the_block` |
 | m2. A heartbeat stop that times out still lets the next hive write run | Accepted, fixed. Where each role skill stops the loop (master section 2; worker section 5 step 3 and *Review tasks* step 3): exit 1 from `--stop` means the loop has not exited within 60 seconds and may still be publishing; run `--stop` again, and make no hive write until it exits 0. | `5f94921`; `skills/swarm-master/SKILL.md`, `skills/swarm-worker/SKILL.md`; needle `test_role_skills_wait_for_a_stop_that_timed_out` |
 | n1. Stopping a loop treats any `--loop` process as its own | Accepted, fixed. `_is_loop` requires `--task <id>` (or `--task=<id>`) for the task at hand as well as `--loop`, both for `--stop` and for the lock's live-loop check. | `7f7efb7`; `skills/rip-swarm/rip_swarm/lease.py`; `tests/test_lease.py` (`test_stop_never_kills_the_loop_of_another_task`, `test_a_task_given_with_an_equals_sign_is_its_loop`) |
+
+## Grok implementation review 3 (2026-09-27) — `5a0ad86`
+
+**Reviewer:** Grok Build (`grok-4.7`, high effort), a fresh read-only run through the grok-build bridge over `221ff96..5a0ad86`, with the brief of review 1 plus a check of the fixes of reviews 1 and 2. Recorded as given, without its preamble.
+
+Needs another pass. The helpers for sections 2–5 hold, and the fixes from the first two reviews still hold, but a chain merge that hits `OUTCOME=error` or foreign dirt leaves the heartbeat loop running, so the baton never comes free.
+
+### What holds
+
+Checked against `reviews.py`, `acceptance.py`, `claim.py`, `inbox.py`, `board.py`, `waiter.py`, `lease.py`, `fold.py`, and both role skills. `NEXT` follows the §5.4 table, including a second cannot-build release of the same review. `accept` refuses an artifact until the rounds are met and the head is a clean review, and `--via` does not skip that. A holder reject still counts as a reviewer; a master reject does not. Cascade skips a live claim, tombstones an expired one first, and publishes once. The derived wake stays quiet while a chain claim is live. With `min_reviews` at 0, none of that runs.
+
+The earlier fixes hold. A review runs only the start block and then releases with `review <id> cannot build on <sha>: conflict`. `stop_loop` lets the beat finish, waits until that pid has exited, and signals only the loop whose command line has both `--loop` and this task id. The review procedure heartbeats from the read until `release` or `complete`. The chain checks `rev-parse "<SHA>^{commit}"` before posting. A later cannot-build release still counts the rebase posted after the first one. A dirty chain merge restarts the arm, and the arm starts the loop before the outcome block. Exit 1 from `--stop` blocks the next hive write. The execution rulings I checked are sound: the callable allowlist, the heartbeat-before-re-check order, restarting on `MOVED:`, copying a replacement only after the floor check, and running the replacement step before rejecting `A`.
+
+Verified by reading those paths and by `tests.test_lease`, `tests.test_reviews`, `tests.test_cascade`, `tests.test_packaging`, `tests.test_fold`, `tests.test_inbox`, `tests.test_profile`, `tests.test_board` (168 tests) and `tests.test_rehearsal`, `tests.test_wait` (74 tests), all passing.
+
+### Critical
+
+None.
+
+### Major
+
+#### M1. A chain merge that errors, or stops on dirt it did not make, leaves the heartbeat loop running
+
+`skills/swarm-master/SKILL.md:204`, `skills/swarm-master/SKILL.md:210`, `skills/swarm-master/SKILL.md:145`, `docs/specs/2026-09-26-execution-proposals.md:64`
+
+Merge item 1 starts the loop, then says the items below are what stop it. The preamble stops the loop only before a hive write. Item 7 stops it on leftovers of the master's own check. Foreign dirt is "report and stop, as step 7 does." `OUTCOME=error` is "as step 8," which reports and stops and never runs `--stop`. Ordinary step 4 does stop the loop right after any `OUTCOME=` other than `merged`. Spec §3 requires that kill on the error path, once the worktree is back on `rip-swarm/integration`. The loop is a background process started so it outlives the shell; `--stop` is how it ends.
+
+Scenario: the chain is ready, so the master starts `heartbeat --loop` for the orchestrator and runs the outcome block. `git switch` fails (`RESUMED=failed` or the final else). The block prints `OUTCOME=error` and is back on `rip-swarm/integration`. The master reports that and stops, or returns to section 5. The loop keeps heartbeating for half of `orchestrator_lease_ttl` (the template is 30 minutes). A new `join --role master` exits 2 until that process dies. If this master waits instead, `wait` and the loop both publish on the same hive clone. The same loop is left running when item 7 reports foreign dirt. `Master.merge_arm` never starts a loop (`tests/test_rehearsal.py:463-467`) and returns `"error"` or `"dirty"` with no stop (`tests/test_rehearsal.py:483-484`). `test_master_merge_arm_stops_the_loop_on_every_path` only checks that the preamble sentence exists.
+
+Fix: on foreign dirt and on `OUTCOME=error`, run `--stop` and do not start `wait` until it exits 0, at the same moment ordinary step 4 stops after a non-merged `OUTCOME=`. Have the rehearsal record that stop, and have the packaging needle require `--stop` on item 7's error sentence.
+
+### Minor
+
+#### m1. A holder reject of a chain task, once A is already rejected, runs the ordinary replacement step
+
+`skills/swarm-master/SKILL.md:230-235`, `tests/test_rehearsal.py:283-286`
+
+The chain-task bullet skips step 2 only while `A` is not rejected. After `A` is rejected, the wake falls through to "run the steps as they are." Step 1 short-circuits only when the note is `dependency <id> rejected`. A holder reject carries the holder's own note. Step 2 copies body, `--fixes`, `--kind`, and `--min-reviews`, and does not copy `--reviews`. The handler also says not to skip a step from memory.
+
+Scenario: not-worth-pursuing rejects `A` while Bob holds review `R`. Cascade prints `skipped R (chain of A)` and the master waits; the derived wake stays quiet. Bob rejects `R`. The next wake sees `A` rejected, so the chain-task bullet does not apply, and step 1 does not match. Step 2 can post `Review … (replaces R)` with no `--reviews`. That task is outside `A`'s chain, so a later cascade of `A` does not reject it. It stays open as ordinary work, and `all-complete` waits on it. `test_rejecting_an_artifact_while_a_review_is_claimed` completes the held review; it does not reject it. The rehearsal's `handle_reject` uses the same `A is not rejected` guard.
+
+Fix: once `A` is rejected, a chain task's reject runs step 4 only, as a cascade note already does. Do not post a replacement.
+
+### Nit
+
+None.
+
+## Dispositions (Grok implementation review 3)
+
+| Finding | Disposition | Where |
+|---|---|---|
+| M1. A chain merge that errors, or stops on dirt it did not make, leaves the heartbeat loop running | Accepted, fixed. The merge preamble now says to stop the heartbeat loop on every path of the arm, before its next hive write and before reporting and stopping or going back to section 5, and gives the `--stop` command, run again until it exits 0 (section 2); on an `OUTCOME=` other than `merged`, right after that line, as ordinary step 4 does. Items 4 and 8 name the stop; item 7 runs `--stop` until it exits 0 before reporting foreign dirt and before `OUTCOME=error`'s step 8. The rehearsal's `Master` records the loop's start and stop in `review` and `merge_arm`; the merge-arm cases assert it stopped. Audit of the other exits: ordinary step 9's `MOVED:` ran step 4 again with the loop still running, and step 4 opens with the one-shot heartbeat that section 2 forbids while the loop runs; step 4's stop sentence and *Passes* item 1 now stop the loop on `MOVED:` first. No other exit of the merge arm or of steps 4–9 ends with the loop running. | `48505bd`; `skills/swarm-master/SKILL.md`; `tests/test_rehearsal.py` (`test_an_error_at_merge_stops_the_loop`, `test_a_conflict_at_merge_stops_the_loop_and_posts_the_rebase`, `test_a_moved_integration_stops_the_loop_before_step_4_again`, loop assertions in `test_a_dirty_merge_restarts_the_arm_and_accepts_the_whole_chain` and the other merge-arm cases); needles `test_master_merge_arm_stops_the_loop_on_every_path` (tightened), `test_master_stops_the_loop_on_moved_before_step_4_again`, `test_master_merge_arm_restarts_on_its_own_dirt` (updated) |
+| m1. A holder reject of a chain task, once A is already rejected, runs the ordinary replacement step | Accepted, fixed. A new reject-handler bullet: a chain task whose `A` is rejected (a `claims/<A>.reject.*.json` exists) runs step 4 only, whatever the note says, and not *Review chains*; `A`'s own reject decided about replacements, and step 3 has nothing to do. `Master.handle_reject` treats it as a cascade note. | `48505bd`; `skills/swarm-master/SKILL.md`; `tests/test_rehearsal.py` (`test_a_holders_reject_after_the_artifact_is_rejected_posts_nothing`); needle in `test_master_runs_reviews_py_on_every_chain_wake` |
