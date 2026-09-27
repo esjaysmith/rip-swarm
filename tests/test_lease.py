@@ -106,7 +106,8 @@ class TestHeartbeatLoop(unittest.TestCase):
 
     def test_stop_ends_a_running_loop(self):
         # A stand-in process whose command line carries --loop, like the real one.
-        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)", "--loop"])
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
+                                 "--task", self.tid, "--loop"])
         try:
             path = acquire_loop_lock(self.hive, self.tid)
             path.write_text(str(proc.pid), encoding="utf-8")
@@ -171,7 +172,7 @@ class TestHeartbeatLoop(unittest.TestCase):
 
     def test_stop_reports_a_loop_that_does_not_exit(self):
         code = "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)"
-        proc = subprocess.Popen([sys.executable, "-c", code, "--loop"])
+        proc = subprocess.Popen([sys.executable, "-c", code, "--task", self.tid, "--loop"])
         try:
             time.sleep(0.5)                                    # the handler is installed
             path = acquire_loop_lock(self.hive, self.tid)
@@ -193,6 +194,36 @@ class TestHeartbeatLoop(unittest.TestCase):
             self.assertEqual(stop_loop(self.hive, self.tid),
                              f"no heartbeat loop running for {self.tid}")
             self.assertIsNone(proc.poll())
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_stop_never_kills_the_loop_of_another_task(self):
+        # Grok review 2, n1: a stale pid reused by another task's loop is not ours.
+        other = create_task(self.hive, title="u", created_by="op", now=T0)["id"]
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
+                                 "--task", other, "--loop"])
+        try:
+            path = acquire_loop_lock(self.hive, self.tid)
+            path.write_text(str(proc.pid), encoding="utf-8")                 # a stale, reused pid
+            self.assertEqual(stop_loop(self.hive, self.tid),
+                             f"no heartbeat loop running for {self.tid}")
+            self.assertIsNone(proc.poll())
+            path = acquire_loop_lock(self.hive, self.tid)                    # nor does it block ours
+            path.write_text(str(proc.pid), encoding="utf-8")
+            release_loop_lock(acquire_loop_lock(self.hive, self.tid))
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_a_task_given_with_an_equals_sign_is_its_loop(self):
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)",
+                                 f"--task={self.tid}", "--loop"])
+        try:
+            path = acquire_loop_lock(self.hive, self.tid)
+            path.write_text(str(proc.pid), encoding="utf-8")
+            self.assertEqual(stop_loop(self.hive, self.tid),
+                             f"stopped heartbeat loop {proc.pid} for {self.tid}")
         finally:
             proc.kill()
             proc.wait()

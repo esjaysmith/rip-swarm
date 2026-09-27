@@ -110,14 +110,18 @@ def _pid_path(hive: Path, task_id: str) -> Path:
     return state_dir(hive) / f"rip-swarm-heartbeat-{task_id}.pid"
 
 
-def _is_loop(pid: int) -> bool:
-    """A stale pid file may name a pid the system has since reused. Where
-    /proc exists, only a process started with --loop is ours to stop."""
+def _is_loop(pid: int, task_id: str) -> bool:
+    """A stale pid file may name a pid the system has since reused, even by
+    another task's loop. Where /proc exists, only a process started with
+    --loop and with --task `task_id` is ours to stop."""
     try:
         cmdline = Path(f"/proc/{pid}/cmdline").read_bytes()
     except OSError:
         return True
-    return b"--loop" in cmdline.split(b"\0")
+    args, task = cmdline.split(b"\0"), task_id.encode()
+    ours = b"--task=" + task in args or any(
+        flag == b"--task" and value == task for flag, value in zip(args, args[1:]))
+    return b"--loop" in args and ours
 
 
 def acquire_loop_lock(hive: Path, task_id: str) -> Path:
@@ -127,7 +131,7 @@ def acquire_loop_lock(hive: Path, task_id: str) -> Path:
         if create_pid_file(path):                  # never seen without its pid
             return path
         pid = _read_pid(path)
-        if pid is not None and _alive(pid) and (pid == os.getpid() or _is_loop(pid)):
+        if pid is not None and _alive(pid) and (pid == os.getpid() or _is_loop(pid, task_id)):
             raise LoopRunning(task_id, pid)
         path.unlink(missing_ok=True)
     raise LoopRunning(task_id, _read_pid(path) or 0)
@@ -156,7 +160,7 @@ def stop_loop(hive: Path, task_id: str, *, timeout: float = STOP_TIMEOUT) -> str
     progress finishes first (see LoopStop)."""
     path = _pid_path(hive, task_id)
     pid = _read_pid(path)
-    if pid is None or not _alive(pid) or not _is_loop(pid):
+    if pid is None or not _alive(pid) or not _is_loop(pid, task_id):
         path.unlink(missing_ok=True)
         return f"no heartbeat loop running for {task_id}"
     os.kill(pid, signal.SIGTERM)
