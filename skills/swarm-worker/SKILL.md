@@ -116,6 +116,21 @@ Every git command you run for a task is `WORKTREE=<WORKTREE>; git -C "$WORKTREE"
    `complete` is the handoff: the master is woken by its tombstone and reads the result from `result_ref`. Do not send a result message.
 6. Go back to waiting.
 
+**Review tasks.** A task whose inbox file (`<HIVE>/inbox/<id>.json`) has `"reviews"` asks you to review another task's result, not to change it. Do it this way:
+
+1. Run step 1 with `BUILD_ON=` the sha the body names, as for a task with `fixes`.
+2. If that does not merge cleanly (`SYNC=error`, `BUILD=conflict` or `BUILD=error`), resolve nothing. In all three cases:
+   1. abort a merge only if one is in progress: `WORKTREE=<WORKTREE>; if git -C "$WORKTREE" rev-parse -q --verify MERGE_HEAD >/dev/null; then git -C "$WORKTREE" merge --abort; fi`;
+   2. release the task: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" release --hive "$HIVE" --task <id> --agent "$AGENT" --note "review <id> cannot build on <sha>: conflict"`. `<id>` is this review task and `<sha>` is the `BUILD_ON` value, the sha the body names: never `HEAD`, which after the abort is the integration tip. A master that takes over has only this note to go on;
+   3. message the master with the same text: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/message.py" --hive "$HIVE" --from "$AGENT" --to orchestrator --type note --body "review <id> cannot build on <sha>: conflict"`, and go back to waiting.
+
+   A resolution would land inside the review commit and could be stamped clean, so the master posts a rebase instead.
+3. Read the artifact at that sha, and write the review where the body says: a numbered section appended to the reviewed document, or the file it names for code.
+4. Edit nothing else.
+5. Commit it as step 4 does, and complete with step 5's command, `--result-ref` included, plus `--verdict clean` or `--verdict findings`. The verdict is `clean` only when the review has no finding that needs a change. Exit 1 naming `--verdict` means the flag was wrong: the claim is still yours, so fix it and run `complete` again.
+
+`claim` refuses a task of a review chain with exit 2 in three cases: `<agent> wrote part of <A>` (you may not review what you wrote), `<agent> reviewed <A>` (a reviewer may not fix, even after only releasing a review), and `<A> is rejected`. Go back to waiting, as for any exit 2 on `claim`.
+
 **Exit 2 from `heartbeat` or `complete`** means you no longer hold the claim. The message says which:
 - `claim expired`: your lease ran out but nobody took the task. Re-run the claim once (`RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" --hive "$HIVE" --task <id> --agent "$AGENT"`). If it exits 0, re-run the heartbeat or `complete` that failed and continue.
 - Anything else (`held by <agent>`, `no active claim for <id>`), or the re-claim exits 2: the lease is lost, exactly as for `wake lease-lost`. Do not complete. Message the orchestrator, and the new holder if the message names one, with your `HEAD` sha so they can build on it. Go back to waiting.

@@ -65,14 +65,15 @@ python3 "$SKILL_DIR/scripts/message.py" --hive "$HIVE" --from "$AGENT" --to AGEN
 ## Tasks, claims, acceptance
 
 ```bash
-python3 "$SKILL_DIR/scripts/inbox.py" --hive "$HIVE" --created-by "$AGENT" --title "…" --body "…" [--after ID]… [--fixes ID]
+python3 "$SKILL_DIR/scripts/inbox.py" --hive "$HIVE" --created-by "$AGENT" --title "…" --body "…" [--after ID]… [--fixes ID] [--kind K [--min-reviews N]] [--reviews ID]
 python3 "$SKILL_DIR/scripts/claim.py" --hive "$HIVE" --task ID --agent "$AGENT"
 python3 "$SKILL_DIR/scripts/claim.py" heartbeat --hive "$HIVE" --task ID --agent "$AGENT"
 python3 "$SKILL_DIR/scripts/claim.py" heartbeat --hive "$HIVE" --task ID --agent "$AGENT" --loop|--stop
-python3 "$SKILL_DIR/scripts/claim.py" complete --hive "$HIVE" --task ID --agent "$AGENT" --result-ref "rip-swarm/$AGENT@SHA"
+python3 "$SKILL_DIR/scripts/claim.py" complete --hive "$HIVE" --task ID --agent "$AGENT" --result-ref "rip-swarm/$AGENT@SHA" [--verdict clean|findings]
 python3 "$SKILL_DIR/scripts/claim.py" release|reject --hive "$HIVE" --task ID --agent "$AGENT" --note "why"
 python3 "$SKILL_DIR/scripts/claim.py" reject --hive "$HIVE" --task ID --agent "$AGENT" --cascade
 python3 "$SKILL_DIR/scripts/accept.py" --hive "$HIVE" --agent "$AGENT" --task ID --integration-sha SHA [--via ID]
+python3 "$SKILL_DIR/scripts/reviews.py" --hive "$HIVE" --task ID
 ```
 
 Rules for tasks and claims:
@@ -85,6 +86,16 @@ Rules for tasks and claims:
 - `reject` by the baton holder drops a task that has no live claim. Workers may reject only what they hold.
 - `reject --cascade` (baton holder, once `ID` is rejected) rejects every task that waits on `ID` through `after`, directly or further down, in one publish, with the note `dependency ID rejected`. It prints `rejected <id>`, `already rejected <id>` or `skipped <id> held by <agent> until <time>` per task. It refuses `--note`.
 - `accept` is master-only and idempotent: a second call prints `already accepted`. It refuses a rejected task with exit 2.
+
+Review rounds (a reviewed artifact has `min_reviews` of 1 or more):
+
+- `--kind K` marks an artifact. Its `min_reviews` defaults to the profile's `min_reviews[K]` and may not be lower, except in an exact copy: a post titled `… (replaces <X>)` of a rejected `X` with the same kind and number.
+- `--reviews A` posts a review task of artifact `A`. It takes no `--fixes`, `--kind` or `--min-reviews`. Revise, rebase and follow-up tasks of `A` use `--fixes A`.
+- A review task completes with `--verdict clean|findings`, and no other task takes one (exit 1 either way; nothing is written).
+- `claim` refuses a review of `A` to anyone who completed `A` or a fix of it, a fix of `A` to anyone who claimed a review of it, and any chain task of a rejected `A`.
+- `accept` refuses `A` until it has `min_reviews` rounds and its latest chain result is a clean review. `--via` does not bypass this.
+- `reviews.py` prints the chain's next step: `NEXT=… ARTIFACT=A ROUNDS=k/N HEAD=… SHA=… CHAIN=… [REVIEW=…]`, or exits 1.
+- `reject --cascade` of a reviewed artifact also rejects its chain. A held chain task prints `skipped <id> (chain of <A>) held by <agent> until <time>`.
 
 ## Promote, lookback
 

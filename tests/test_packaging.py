@@ -188,7 +188,7 @@ class TestPackaging(unittest.TestCase):
         # Replacements come first: before the dependents are rejected, while the wake
         # still recurs, and before the orphan step, which a replacement's `--fixes` settles.
         self.assertLess(handler.index("(replaces <T>)"), handler.index("**Orphaned original.**"))
-        self.assertLess(handler.index("(replaces <T>)"), handler.index("--cascade"))
+        self.assertLess(handler.index("(replaces <T>)"), handler.index('--task <T> --agent "$AGENT" --cascade'))
 
     def test_heartbeat_loop_replaces_the_fifteen_minutes(self):
         # Execution proposals §3: the lease comes from the profile, not the prose.
@@ -255,6 +255,68 @@ class TestPackaging(unittest.TestCase):
 
     def test_worker_never_sends_its_brief(self):
         self.assertIn('--body "joined"', self._text("swarm-worker"))
+
+    def _section(self, text, start, end):
+        return text[text.index(start):text.index(end)]
+
+    def test_master_marks_artifacts_with_the_larger_number(self):
+        text = self._text("swarm-master")
+        plan = self._section(text, "## 4. Plan and post", "## 5.")
+        for needle in ("reviews: <kind>=<N>", "the larger of the phrase's number and the profile's",
+                       "--kind <kind>", "--min-reviews <N>",
+                       "`min_reviews for <kind> is at least <n> (profile)`",
+                       "without `--kind`"):
+            self.assertIn(needle, plan)
+
+    def test_master_runs_reviews_py_on_every_chain_wake(self):
+        text = self._text("swarm-master")
+        complete = self._section(text, "### `wake task-finished <T> complete`", "### Review chains")
+        self.assertIn("**Review chains first.**", complete)
+        self.assertLess(complete.index("**Review chains first.**"), complete.index("1. If `<HIVE>/accepted/<T>.json`"))
+        chains = self._section(text, "### Review chains", "### `wake task-finished <T> release`")
+        for needle in ('RS=<RS>; HIVE=<HIVE>; python3 "$RS/scripts/reviews.py" --hive "$HIVE" --task <T>',
+                       "NEXT=<post-review|post-revise|post-rebase|reject-review|merge|wait|done>",
+                       "**`post-rebase` or `reject-review`** first",
+                       "read the head first when it is a review",
+                       '--note "review rejected: <why>"',
+                       "--reviews <A>", "Revise <title> after review <k>",
+                       "In every skill command below, `<T>` is `<A>`",
+                       "again **before** the fast-forward",
+                       "same `HEAD=` and `SHA=`",
+                       "accept each id of `CHAIN`, in order, then `A`",
+                       "message the author of `A`",
+                       "post the replacement first",
+                       "reject **`A`**, not the woken review",
+                       "reject that review, not `A`",
+                       "Merge <SHA> onto rip-swarm/integration and resolve the conflict; the resolution is the work.",
+                       '--note "superseded by rebase <id>"'):
+            self.assertIn(needle, chains)
+        release = self._section(text, "### `wake task-finished <T> release`", "### `wake task-finished <T> reject`")
+        self.assertIn("*Review chains*", release)
+        reject = self._section(text, "### `wake task-finished <T> reject`", "### Other wakes")
+        for needle in ("**`<T>` is a chain task**", "skip steps 2 and 3", "**`<T>` is a reviewed artifact**",
+                       "`skipped <id> (chain of <T>) held by", "Skip step 2 when `<T>` has a chain",
+                       "its `--kind` and `--min-reviews`"):
+            self.assertIn(needle, reject)
+        other = self._section(text, "### Other wakes", "## 7.")
+        self.assertIn("when `NEXT` is `wait` or `done`", other)
+
+    def test_worker_reviews_with_a_verdict_and_never_resolves(self):
+        text = self._text("swarm-worker")
+        review = self._section(text, "**Review tasks.**", "Never push a project branch")
+        for needle in ("--verdict clean", "--verdict findings",
+                       'WORKTREE=<WORKTREE>; if git -C "$WORKTREE" rev-parse -q --verify MERGE_HEAD >/dev/null; then git -C "$WORKTREE" merge --abort; fi',
+                       '--note "review <id> cannot build on <sha>: conflict"',
+                       "never `HEAD`", "`SYNC=error`, `BUILD=conflict` or `BUILD=error`",
+                       "Edit nothing else.", "`<agent> wrote part of <A>`",
+                       "`<agent> reviewed <A>`", "`<A> is rejected`"):
+            self.assertIn(needle, review)
+
+    def test_reference_names_the_review_surface(self):
+        ref = (SKILLS / "rip-swarm" / "SKILL.md").read_text(encoding="utf-8")
+        for needle in ("--kind", "--min-reviews", "--reviews", "--verdict clean|findings",
+                       'scripts/reviews.py" --hive "$HIVE" --task ID', "(chain of <A>)"):
+            self.assertIn(needle, ref)
 
     def test_readme_documents_install_and_roles(self):
         text = (REPO / "README.md").read_text(encoding="utf-8")
