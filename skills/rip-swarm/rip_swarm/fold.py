@@ -60,7 +60,9 @@ def _from_doc(task_id: str, path: Path, doc: dict, now: datetime) -> Holder | Ex
 _FINAL_ACTIONS = ("complete", "release", "reject")
 
 
-def has_final_tombstone(claims_dir: Path, task_id: str) -> str | None:
+def has_final_tombstone(
+    claims_dir: Path, task_id: str, claim_id: str | None = None
+) -> str | None:
     """The final action (complete/release/reject) whose tombstone exists
     beside the active claim, or None. Truthy exactly when one does.
 
@@ -69,25 +71,45 @@ def has_final_tombstone(claims_dir: Path, task_id: str) -> str | None:
     cleanly settled, so callers report it as corrupt instead of picking one.
     `expired` tombstones are excluded: one beside a fresh claim is the normal
     steal path, not a crash window.
+
+    With `claim_id` given, only a tombstone whose own JSON body carries that
+    same claim_id counts - exactly `_finalize`'s crash window. A tombstone
+    from an *earlier* claim on this task_id (a legitimate release-then-reclaim)
+    does not count. An unreadable tombstone body counts anyway (fail closed,
+    as when no `claim_id` filter is given).
     """
     for action in _FINAL_ACTIONS:
-        if any(claims_dir.glob(f"{task_id}.{action}.*.json")):
-            return action
+        for path in sorted(claims_dir.glob(f"{task_id}.{action}.*.json")):
+            if claim_id is None:
+                return action
+            try:
+                body = read_json(path)
+            except (OSError, ValueError, json.JSONDecodeError):
+                return action
+            if body.get("claim_id") == claim_id:
+                return action
     return None
 
 
 def _fold_path(task_id: str, path: Path, now: datetime) -> Holder | Expired | Corrupt:
-    action = has_final_tombstone(path.parent, task_id)
+    try:
+        doc = read_json(path)
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        action = has_final_tombstone(path.parent, task_id)
+        if action is not None:
+            return Corrupt(
+                task_id=task_id,
+                path=path,
+                error=f"active claim and {action} tombstone coexist",
+            )
+        return Corrupt(task_id=task_id, path=path, error=f"{type(e).__name__}: {e}")
+    action = has_final_tombstone(path.parent, task_id, doc.get("claim_id"))
     if action is not None:
         return Corrupt(
             task_id=task_id,
             path=path,
             error=f"active claim and {action} tombstone coexist",
         )
-    try:
-        doc = read_json(path)
-    except (OSError, ValueError, json.JSONDecodeError) as e:
-        return Corrupt(task_id=task_id, path=path, error=f"{type(e).__name__}: {e}")
     body_id = doc.get("task_id")
     if body_id is not None and body_id != task_id:
         return Corrupt(

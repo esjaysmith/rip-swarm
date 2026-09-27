@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from rip_swarm.claim import claim_baton, complete, try_claim
+from rip_swarm.claim import claim_baton, complete, release, try_claim
 from rip_swarm.fold import (
     Corrupt,
     Expired,
@@ -213,6 +213,32 @@ class TestFold(unittest.TestCase):
         recs = corrupt_claims(self.hive)
         self.assertEqual([r.task_id for r in recs], [tid])
         self.assertEqual(recs[0].error, "active claim and reject tombstone coexist")
+
+    # --- task 5b: a re-claim after a release is not a crash window ----------
+
+    def test_reclaim_by_another_agent_after_release_is_holder(self):
+        tid = self.task["id"]
+        try_claim(self.hive, tid, "alice", "claude-code", T0, 900)
+        release(self.hive, tid, "alice", T0)
+        try_claim(self.hive, tid, "bob", "codex", T0, 900)
+        rec = active_holder(self.hive, tid, T0)
+        self.assertIsInstance(rec, Holder)
+        self.assertEqual(rec.agent, "bob")
+        self.assertEqual(corrupt_claims(self.hive), [])
+
+    def test_crash_window_still_corrupt_when_claim_id_matches(self):
+        # Same reproduction as _plant_crash_window: the tombstone carries the
+        # active claim's own claim_id (the crash-window case), so this must
+        # still fold Corrupt even with the claim_id-aware check.
+        tid = self._plant_crash_window("release")
+        active = self.hive / "claims" / f"{tid}.json"
+        active_claim_id = json.loads(active.read_text(encoding="utf-8"))["claim_id"]
+        tombstone = self.hive / "claims" / f"{tid}.release.20260917T090100Z.json"
+        tombstone_claim_id = json.loads(tombstone.read_text(encoding="utf-8"))["claim_id"]
+        self.assertEqual(active_claim_id, tombstone_claim_id)
+        rec = active_holder(self.hive, tid, T0)
+        self.assertIsInstance(rec, Corrupt)
+        self.assertEqual(rec.error, "active claim and release tombstone coexist")
 
     def test_expired_tombstone_beside_active_claim_is_still_a_holder(self):
         tid = self.task["id"]
