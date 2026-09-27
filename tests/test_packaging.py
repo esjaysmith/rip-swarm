@@ -329,6 +329,33 @@ class TestPackaging(unittest.TestCase):
         self.assertLess(section.index(pointer),
                          section.index("1. Start the task from `rip-swarm/integration`"))
 
+    def test_worker_review_runs_only_the_start_block(self):
+        # Grok review 1, M1: step 1's error bullet releases with a note the
+        # master never reads as a review that cannot build, so a review runs
+        # step 1's command block only, then its own step 2.
+        text = self._text("swarm-worker")
+        section = self._section(text, "## 5. Do a claimed task", "## 6. Leave")
+        error_bullet = next(line for line in section.splitlines()
+                            if line.lstrip().startswith("- `SYNC=error` or `BUILD=error`"))
+        self.assertIn("(never in a review task: see **Review tasks**)", error_bullet)
+        review = self._section(text, "**Review tasks.**", "Never push a project branch")
+        step_1 = self._section(review, "1. Run only step 1's command block", "2. If that does not merge")
+        for needle in ("`BUILD_ON=` the sha the body names", "step 1's `SYNC=dirty` bullet",
+                       "go to step 2 below, never to step 1's other bullets"):
+            self.assertIn(needle, step_1)
+
+    def test_worker_review_heartbeats_until_it_releases_or_completes(self):
+        # Grok review 1, M3: a review outlasting worker_lease_ttl lost its claim.
+        text = self._text("swarm-worker")
+        review = self._section(text, "**Review tasks.**", "Never push a project branch")
+        loop = ('RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat '
+                '--hive "$HIVE" --task <id> --agent "$AGENT" --loop')
+        for needle in (loop, "`--stop` in place of `--loop`", "before you `release` or `complete`",
+                       "Stop the heartbeat loop, commit it as step 4 does"):
+            self.assertIn(needle, review)
+        self.assertLess(review.index(loop), review.index("Read the artifact at that sha"))
+        self.assertLess(review.index("Stop the heartbeat loop, commit"), review.index("--verdict clean"))
+
     def test_master_merge_arm_resyncs_before_comparing(self):
         # Fix round 1, F2: reviews.py reads the local clone, which only a
         # heartbeat (one-shot or the loop's own publishes) fetches and

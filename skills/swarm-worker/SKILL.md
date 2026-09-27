@@ -98,7 +98,7 @@ If `<HIVE>/inbox/<id>.json` has `"reviews"`, this is a review task: follow **Rev
    Read the `SYNC=` line:
    - `SYNC=merged`, `SYNC=none` (no integration branch yet, so nothing to merge) or `SYNC=reset`: carry on. `SYNC=reset` means your branch held commits that integration lacks; they are kept under the ref named by `KEPT=` (`refs/rip-swarm/prev/<AGENT>/<old tip>`), so the master can still review an earlier result by its sha. Mention the ref in your final report.
    - `SYNC=dirty`: `WORKTREE` has uncommitted changes, left over from your own earlier work. Nothing was touched. Commit them with `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit -m "wip: leftovers"` and run the block again; they are then kept under the `KEPT=` ref and stay out of this task.
-   - `SYNC=error` or `BUILD=error`: a merge or reset failed without a conflict. Run `WORKTREE=<WORKTREE>; git -C "$WORKTREE" rev-parse -q --verify MERGE_HEAD >/dev/null && git -C "$WORKTREE" merge --abort`, then `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" release --hive "$HIVE" --task <id> --agent "$AGENT" --note "cannot start from integration: <git error>"`, message the orchestrator, and go back to waiting.
+   - `SYNC=error` or `BUILD=error` (never in a review task: see **Review tasks**): a merge or reset failed without a conflict. Run `WORKTREE=<WORKTREE>; git -C "$WORKTREE" rev-parse -q --verify MERGE_HEAD >/dev/null && git -C "$WORKTREE" merge --abort`, then `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" release --hive "$HIVE" --task <id> --agent "$AGENT" --note "cannot start from integration: <git error>"`, message the orchestrator, and go back to waiting.
 
    Then the merge of `BUILD_ON` (`BUILD=`), which the block always runs when `BUILD_ON` is set:
    - `BUILD=none` (an ordinary task) or `BUILD=merged`: carry on.
@@ -120,16 +120,17 @@ If `<HIVE>/inbox/<id>.json` has `"reviews"`, this is a review task: follow **Rev
 
 **Review tasks.** A task whose inbox file (`<HIVE>/inbox/<id>.json`) has `"reviews"` asks you to review another task's result, not to change it. Do it this way:
 
-1. Run step 1 with `BUILD_ON=` the sha the body names, as for a task with `fixes`.
+1. Run only step 1's command block, with `BUILD_ON=` the sha the body names, as for a task with `fixes`. On `SYNC=dirty`, do what step 1's `SYNC=dirty` bullet says and run the block again. On any other line, go to step 2 below, never to step 1's other bullets: their release note, `cannot start from integration: …`, is not one the master reads as a review that cannot build, so the chain would wait for it.
 2. If that does not merge cleanly (`SYNC=error`, `BUILD=conflict` or `BUILD=error`), resolve nothing. In all three cases:
    1. abort a merge only if one is in progress: `WORKTREE=<WORKTREE>; if git -C "$WORKTREE" rev-parse -q --verify MERGE_HEAD >/dev/null; then git -C "$WORKTREE" merge --abort; fi`;
    2. release the task: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" release --hive "$HIVE" --task <id> --agent "$AGENT" --note "review <id> cannot build on <sha>: conflict"`. `<id>` is this review task and `<sha>` is the `BUILD_ON` value, the sha the body names: never `HEAD`, which after the abort is the integration tip. A master that takes over has only this note to go on;
    3. message the master with the same text: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/message.py" --hive "$HIVE" --from "$AGENT" --to orchestrator --type note --body "review <id> cannot build on <sha>: conflict"`, and go back to waiting.
 
    A resolution would land inside the review commit and could be stamped clean, so the master posts a rebase instead.
-3. Read the artifact at that sha, and write the review where the body says: a numbered section appended to the reviewed document, or the file it names for code.
-4. Edit nothing else.
-5. Commit it as step 4 does, and complete with step 5's command, `--result-ref` included, plus `--verdict clean` or `--verdict findings`. The verdict is `clean` only when the review has no finding that needs a change. Exit 1 naming `--verdict` means the flag was wrong: the claim is still yours, so fix it and run `complete` again.
+3. Start the heartbeat loop in the background before you read the artifact, as ordinary step 3 above does: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT" --loop`. Stop it with the same command, `--stop` in place of `--loop`, before you `release` or `complete` this task, on every path. If it ended with exit 2 before you stopped it, handle it as an exit 2 from `heartbeat` (below).
+4. Read the artifact at that sha, and write the review where the body says: a numbered section appended to the reviewed document, or the file it names for code.
+5. Edit nothing else.
+6. Stop the heartbeat loop, commit it as step 4 does, and complete with step 5's command, `--result-ref` included, plus `--verdict clean` or `--verdict findings`. The verdict is `clean` only when the review has no finding that needs a change. Exit 1 naming `--verdict` means the flag was wrong: the claim is still yours, so fix it and run `complete` again.
 
 `claim` refuses a task of a review chain with exit 2 in three cases: `<agent> wrote part of <A>` (you may not review what you wrote), `<agent> reviewed <A>` (a reviewer may not fix, even after only releasing a review), and `<A> is rejected`. Go back to waiting, as for any exit 2 on `claim`.
 
