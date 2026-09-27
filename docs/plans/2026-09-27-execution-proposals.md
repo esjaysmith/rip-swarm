@@ -3736,3 +3736,81 @@ Fix: in `post-review` and `post-rebase`, if `SHA` is not a commit, reject the ar
 | M3. A review task never heartbeats | Accepted, fixed. Review tasks step 3 starts the heartbeat loop before the artifact is read, and stops it before `release` or `complete`, on every path; step 6 stops it before the commit and `complete`. | `6d31569`; `skills/swarm-worker/SKILL.md`; needle `test_worker_review_heartbeats_until_it_releases_or_completes` |
 | m1. Two heartbeat loops can start together | Accepted, fixed. `state.create_pid_file` writes the pid to a temporary file in the same directory and hard-links it into place, so a lock file is never seen without its pid. The wait lock had the same window and uses the same helper. | `a85b32b`; `skills/rip-swarm/rip_swarm/state.py`, `lease.py`; `test_a_loop_lock_is_never_seen_without_its_pid` |
 | m2. A bad `result_ref` on the artifact itself never takes the badsha path | Accepted, fixed. *Review chains* checks `rev-parse -q --verify "<SHA>^{commit}"` before posting: `post-review` rejects the head (`A` or a fix of `A`) with the ordinary badsha note and messages its author; `post-rebase` whose note names a non-commit rejects the released review, posts no rebase, and runs the helper again, whose `post-review` check then rejects the head. Arm 2's `git show` of a review head that is not a commit is `merge` item 8's case: that review is rejected. Mirrored in the rehearsal's `Master.chain_wake`. | `56ce9bb`; `skills/swarm-master/SKILL.md`; `tests/test_rehearsal.py` (`test_an_artifact_whose_result_ref_is_not_a_commit_is_rejected_unreviewed`, `test_a_review_released_on_a_sha_that_is_not_a_commit_rejects_the_artifact`, `test_a_review_head_that_is_not_a_commit_gets_no_next_round`); needle `test_master_checks_the_sha_before_posting_a_chain_task` |
+
+## Grok implementation review 2 (2026-09-27) — `f7089ff`
+
+**Reviewer:** Grok Build (`grok-4.7`, high effort), a fresh read-only run through the grok-build bridge over `221ff96..f7089ff`, with the brief of review 1 plus a check of its fixes. Recorded as given, without its preamble.
+
+Needs another pass. The board rules for a review chain hold, and the five fixes from the first review still hold, but a second cannot-build release posts another rebase, and a dirty chain merge follows the ordinary accept path and leaves the chain unaccepted.
+
+### What holds
+
+Checked against `reviews.py`, `acceptance.py`, `claim.py`, `inbox.py`, `board.py`, `waiter.py`, `lease.py`, and both role skills. `NEXT` follows the §5.4 table, including a rebase already posted after one cannot-build release. `accept` refuses an artifact until the rounds are met and the head is a clean review, and `--via` does not skip that. A holder reject still counts as a reviewer (the tombstone has no `"action"` field); a master reject does not. Cascade skips a live claim, tombstones an expired one first, and publishes once. The derived wake stays quiet while a chain claim is live. With `min_reviews` at 0, none of that runs.
+
+The first-pass fixes hold. A review runs only the start block and then releases with `review <id> cannot build on <sha>: conflict` (`skills/swarm-worker/SKILL.md` lines 101 and 122–127). `stop_loop` lets the beat finish and waits until that pid has exited (`lease.py` lines 88–106 and 153–170). The review procedure starts the heartbeat loop before the read and stops it before `release` or `complete`. The chain checks `rev-parse "<SHA>^{commit}"` before posting, and a non-commit on the artifact rejects that head. The execution rulings I checked are sound: the callable allowlist, the heartbeat-before-re-check order, restarting the merge arm on `MOVED:`, copying a replacement only after the floor check, and running the replacement step before rejecting `A`. Ten focused tests covering those fixes, the one-release rebase, accept, and the derived wake passed.
+
+### Critical
+
+None.
+
+### Major
+
+#### M1. A later cannot-build release hides the rebase already posted
+
+`skills/rip-swarm/rip_swarm/reviews.py:157-167`
+
+The cannot-build row uses the latest release only. `since` is that tombstone's stamp, and a fix counts only when its `created_at` is at or after that stamp. A review that was released as unable to build stays open until the master rejects it, so another worker can claim it and release it again with the same note. That newer stamp is after the rebase, so the rebase no longer counts.
+
+Scenario: Alice completes spec `A`. Bob releases review `R` with `review R cannot build on abc1234: conflict`. The master posts rebase `F` (`NEXT=reject-review`). Before the reject lands, Carol claims `R` and releases it with the same note. `reviews.py` prints `NEXT=post-rebase` again. The master posts a second rebase of `A`. I ran that board: after the first release the helper printed `post-rebase`, after `F` it printed `reject-review`, and after Carol's release it printed `post-rebase` again. `test_a_review_that_cannot_build_asks_for_a_rebase_once` never releases a second time. The rehearsal's `Session.review` releases once and stops.
+
+Fix: if the latest release note matches, decide `post-rebase` versus `reject-review` from the earliest matching cannot-build release, not the latest. A fix posted after that first release stays "already posted" through every later release of the same review. Add that second release to the `reviews.py` table.
+
+#### M2. A dirty chain merge follows ordinary step 9 and accepts only A
+
+`skills/swarm-master/SKILL.md:150`, `skills/swarm-master/SKILL.md:206`, `skills/swarm-master/SKILL.md:210`
+
+Merge item 7 says to do ordinary steps 7 and 8 with `T=<A>`. Step 7 says: if the dirt is leftover from your own check, remove it and run step 4 again. Item 3 already says what that sentence does on a chain: ordinary step 9 accepts `A` alone, and `CHAIN` stays unaccepted. Item 7 still points at it. Step 9's via-walk follows `fixes`, and the reviews do not fix each other, so they are never accepted.
+
+Scenario: the chain is ready to merge and the integration worktree still has a file from the previous acceptance check. The outcome block prints `OUTCOME=dirty` and creates no review branch. The master cleans the file, runs ordinary step 4, and on `OUTCOME=merged` runs step 9 with `T=<A>`. `A` is accepted. The review and the revise stay in `awaiting_acceptance`. `all-complete` never fires, and a takeover does not see those completes again. `Master.merge_arm` returns `"dirty"` at `tests/test_rehearsal.py:477` and does not follow step 7, so the rehearsal never takes this path.
+
+Fix: on `OUTCOME=dirty`, clean up and restart the merge arm at item 1, the same way item 3 already restarts on `MOVED:`. Point the rehearsal's dirty outcome at that restart.
+
+### Minor
+
+#### m1. The chain merge cites the outcome block and not the loop that has to cover the check
+
+`skills/swarm-master/SKILL.md:94`, `skills/swarm-master/SKILL.md:204-205`
+
+The loop is started in the sentence above step 4's script. Merge item 1 says to run "step 4 (the `OUTCOME=` block)", then run the acceptance check, and only item 2 heartbeats, after that check. Copying the fenced script leaves the check with no loop. Section 3 is this window: a check longer than `orchestrator_lease_ttl` (the template is 30 minutes) drops the baton, and `join` seats a second master on the same integration worktree. `merge_arm` documents that it never starts the loop (`tests/test_rehearsal.py:464`).
+
+Fix: in merge item 1, start the loop before the outcome block and keep the existing stop before the next hive write.
+
+#### m2. A heartbeat stop that times out still lets the next hive write run
+
+`skills/rip-swarm/rip_swarm/lease.py:165-166`, `skills/swarm-worker/SKILL.md:130-133`
+
+`stop_loop` raises `LoopStopTimeout` after 60 seconds, and the CLI turns that into exit 1. The worker review steps say to stop the loop and then commit and `complete`, and they never mention that exit. The reference skill does (`skills/rip-swarm/SKILL.md:85`). The master's "no hive write until you have stopped it" (`skills/swarm-master/SKILL.md:41`) is not in the review steps.
+
+Scenario: the review's loop is inside a heartbeat whose `git push` hangs. `--stop` returns 1 at 60 seconds and the loop is still in that publish. The worker runs `complete` on the same hive clone. The publish hits `index.lock` or a dirty tree and exits 1, and a publish that is left dirty blocks later hive writes. `test_stop_reports_a_loop_that_does_not_exit` checks the timeout itself, not the skill's next command.
+
+Fix: in both role skills, say that exit 1 from `--stop` means the loop may still be publishing, and the next hive write waits until a later `--stop` exits 0.
+
+### Nit
+
+#### n1. Stopping a loop treats any `--loop` process as its own
+
+`skills/rip-swarm/rip_swarm/lease.py:113-120`
+
+`_is_loop` returns true when `/proc/<pid>/cmdline` contains `--loop`. It does not look for the task id, which the command line also carries. A stale pid file whose pid was reused by another task's loop is signalled by `--stop`, and that other loop exits. The window is a hard-killed loop and a recycled pid before `--stop`. `test_stop_never_kills_a_process_that_is_not_a_loop` covers a process that is not a loop.
+
+Fix: require the task id in the command line as well as `--loop`.
+
+## Dispositions (Grok implementation review 2)
+
+| Finding | Disposition | Where |
+|---|---|---|
+| M1. A later cannot-build release hides the rebase already posted | Accepted, fixed. When the latest release of an open review is a cannot-build note, `post-rebase` versus `reject-review` is decided from the earliest cannot-build release of that review: a fix posted at or after it is the rebase already posted, through every later release of the same review. Spec §5.4's row still says "since that release" (the latest); it needs the same wording. | `140ce3b`; `skills/rip-swarm/rip_swarm/reviews.py`; `tests/test_reviews.py` (`test_a_second_cannot_build_release_keeps_the_rebase_posted`); `tests/test_rehearsal.py` (`test_a_second_release_of_the_same_review_posts_no_second_rebase`) |
+| M2. A dirty chain merge follows ordinary step 9 and accepts only A | Accepted, fixed. Merge item 7 now handles `OUTCOME=dirty` itself: on leftovers of the master's own check, stop the heartbeat loop, remove them and restart the merge arm at item 1, as item 3 does on `MOVED:`, and never follow step 7's "run step 4 again"; any other dirt is reported and the master stops, as step 7 says. `OUTCOME=error` stays as step 8. The rehearsal's `Master.merge_arm` follows the restart. | `5f94921`; `skills/swarm-master/SKILL.md`; `tests/test_rehearsal.py` (`test_a_dirty_merge_restarts_the_arm_and_accepts_the_whole_chain`); needle `test_master_merge_arm_restarts_on_its_own_dirt` |
+| m1. The chain merge cites the outcome block and not the loop that has to cover the check | Accepted, fixed. Merge item 1 now says: heartbeat (the full command), then start the heartbeat loop in the background (section 2), then run step 4's `OUTCOME=` block; the loop covers the block and the acceptance check. | `5f94921`; `skills/swarm-master/SKILL.md`; needle `test_master_merge_arm_starts_the_loop_before_the_block` |
+| m2. A heartbeat stop that times out still lets the next hive write run | Accepted, fixed. Where each role skill stops the loop (master section 2; worker section 5 step 3 and *Review tasks* step 3): exit 1 from `--stop` means the loop has not exited within 60 seconds and may still be publishing; run `--stop` again, and make no hive write until it exits 0. | `5f94921`; `skills/swarm-master/SKILL.md`, `skills/swarm-worker/SKILL.md`; needle `test_role_skills_wait_for_a_stop_that_timed_out` |
+| n1. Stopping a loop treats any `--loop` process as its own | Accepted, fixed. `_is_loop` requires `--task <id>` (or `--task=<id>`) for the task at hand as well as `--loop`, both for `--stop` and for the lock's live-loop check. | `7f7efb7`; `skills/rip-swarm/rip_swarm/lease.py`; `tests/test_lease.py` (`test_stop_never_kills_the_loop_of_another_task`, `test_a_task_given_with_an_equals_sign_is_its_loop`) |
