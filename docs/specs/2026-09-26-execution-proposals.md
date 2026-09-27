@@ -1,6 +1,6 @@
 # Execution proposals: cascade, heartbeat, result messages, minimum review rounds
 
-**Status:** proposal. §5 reviewed at `dc611ab` (§7): needs revision (2 critical, 5 major, 3 minor, 1 nit). Revision 2 folds §7 into §5 (dispositions in §8). §5 re-reviewed at `b74679a` (§9): needs revision (1 critical, 2 minor, 1 nit). Revision 3 folds §9 (dispositions in §10). §5 re-reviewed at `515ed0a` (§11): needs revision (1 major, 1 nit). Revision 4 folds §11 (dispositions in §12). A Grok review of `1e84398` (§13) is folded as revision 5 (dispositions in §14). Not folded into the roles-and-install spec or the skills.
+**Status:** proposal. §5 reviewed at `dc611ab` (§7): needs revision (2 critical, 5 major, 3 minor, 1 nit). Revision 2 folds §7 into §5 (dispositions in §8). §5 re-reviewed at `b74679a` (§9): needs revision (1 critical, 2 minor, 1 nit). Revision 3 folds §9 (dispositions in §10). §5 re-reviewed at `515ed0a` (§11): needs revision (1 major, 1 nit). Revision 4 folds §11 (dispositions in §12). A Grok review of `1e84398` (§13) is folded as revision 5 (dispositions in §14). The operator's fourth review, of `1e84398` (§15), is folded as revision 6 (dispositions in §16). Not folded into the roles-and-install spec or the skills.
 **Date:** 2026-09-26
 **Audience:** operator + implementer
 **Related:** `docs/specs/2026-09-26-roles-and-install.md` §7.2, §7.4, §8 step 6, §9; `docs/specs/2026-09-17-design-spec.md` §9 (`reviews_required_per_plan` stays advisory); `skills/swarm-master/SKILL.md`; `skills/swarm-worker/SKILL.md`; `rip_swarm/waiter.py` (`tick`), `rip_swarm/acceptance.py` (`accept_task`), `rip_swarm/inbox.py`.
@@ -85,7 +85,7 @@ Keep messages for questions, for a release or a conflict the master would not ot
 
 ## 5. Minimum independent review rounds per artifact kind
 
-**Status:** design agreed with the operator (2026-09-26). Revision 2 folds the review in §7 (dispositions in §8); revision 3 folds the second review in §9 (dispositions in §10); revision 4 folds the third review in §11 (dispositions in §12); revision 5 folds a Grok review in §13 (dispositions in §14). It replaces the earlier sketch of consecutive clean reviews.
+**Status:** design agreed with the operator (2026-09-26). Revision 2 folds the review in §7 (dispositions in §8); revision 3 folds the second review in §9 (dispositions in §10); revision 4 folds the third review in §11 (dispositions in §12); revision 5 folds a Grok review in §13 (dispositions in §14); revision 6 folds the fourth review in §15 (dispositions in §16). It replaces the earlier sketch of consecutive clean reviews.
 
 Today the master accepts a completed task after one judgment of its own. Nothing lets the operator say "a spec needs two independent reviews" in a way that a takeover master still sees and that the helpers enforce. With this section, every task the master marks as an artifact carries its number on the board, and no helper lets that number be lowered or its rounds skipped. Marking is the master's plan step: a task posted without `--kind` is not an artifact, and nothing forces one (§5.5). This section adds three things:
 - a number per artifact kind, stated once;
@@ -237,8 +237,8 @@ Because `NEXT=post-…` appears only while no chain task is open, a repeated wak
     1. Run `/swarm-master` §6 step 4, the `OUTCOME=` block, with `T=<A>` and `SHORT=<SHA>`. (That is the skill's §6, not this document's.) On `OUTCOME=merged` it stops with `WORKTREE` on `rip-swarm/review-<A>`. Run the master's acceptance check there, as in step 9.
     2. On a pass, heartbeat and run `reviews.py --task <A>` again **before** step 9's fast-forward command (*Passes*, item 1). It must print `NEXT=merge` with the same `SHA`. Otherwise, run the *Falls short* command with `T=<A>`: it switches to `rip-swarm/integration` first, then deletes `rip-swarm/review-<A>` with `git branch -D`, because the branch is unmerged. Then act on the new `NEXT`.
     3. Run the *Passes* item 1 fast-forward command with `T=<A>` and the `TIP` from the `OUTCOME=` line. In place of *Passes* items 2 and 3, accept each id in `CHAIN` in order, then `A`, all with `--integration-sha <NEW_TIP>`. If `accept` still refuses after the fast-forward, report it to the operator and stop. Do not reset integration: the skill never forces, and a worker may already have merged the new tip.
-    4. **Conflict.** The block has already deleted `rip-swarm/review-<A>`. Post the rebase with the skill's own rebase command (`/swarm-master` §6 step 5) and `T=<A>`. It is posted with `--fixes <A>`, titled `Rebase <title> onto rip-swarm/integration`, and its body is `Merge <SHA> onto rip-swarm/integration and resolve the conflict; the resolution is the work.`, with `<SHA>` taken from the `OUTCOME=` line. A fix builds on the sha its body names, so without it the worker would rebuild from integration alone and drop the chain's commits.
-    5. **Falls short.** Run the *Falls short* command with `T=<A>`, then post the follow-up with `--fixes <A>`, building on `SHA`.
+    4. **Conflict.** The block has already deleted `rip-swarm/review-<A>`. Post the rebase with the skill's own rebase command (`/swarm-master` §6 step 5) and `T=<A>`. It is posted with `--fixes <A>`, titled `Rebase <title> onto rip-swarm/integration`, and its body is `Merge <SHA> onto rip-swarm/integration and resolve the conflict; the resolution is the work.`, with `<SHA>` taken from the `OUTCOME=` line. A fix builds on the sha its body names, so without it the worker would rebuild from integration alone and drop the chain's commits. Then message the author of `A` (the agent that completed `A`), as today's step messages the worker. In a chain the head's completer is a reviewer, who is refused the rebase (§5.3), so the author is the worker who can take it.
+    5. **Falls short.** Run the *Falls short* command with `T=<A>`, then post the follow-up with `--fixes <A>`, as today's *Falls short* step 2 does. Its body names the `SHA` from the `OUTCOME=` line to build on, and the gap to close.
     6. **Not worth pursuing.** Run the *Falls short* command with `T=<A>`, then reject **`A`**, not the woken review. Its reject handler cascades over the chain (§5.5).
 - **A review that cannot build** (§5.7). It shows up in two places:
   - as `wake task-finished <R> release`, whose note is `review <R> cannot build on <sha>: conflict`. The skill's release handler, today "nothing required", gains this case;
@@ -556,3 +556,31 @@ Fix: state that the conflict post is the skill's rebase command with `T=<A>`, an
 | Finding | Disposition | Where |
 |---|---|---|
 | m1. The conflict rebase no longer names the sha | Accepted. Step 4 posts the skill's own rebase command with `T=<A>`: `--fixes <A>`, today's title, and today's body `Merge <SHA> onto rip-swarm/integration and resolve the conflict; the resolution is the work.`, with `<SHA>` from the `OUTCOME=` line. | §5.6 `merge` step 4 |
+
+---
+
+## 15. Fourth review of §5 (2026-09-27) — `1e84398`
+
+**Reviewed tip:** `1e84398` on `feat/min-reviews`. §7, §9, and §11 were not re-opened. (The operator pasted this review in chat; it is recorded here as given. It arrived after revision 5 had already restored the sha, and adds the worker message and the shortfall gap.)
+
+Revision 4 needs another pass. The branch name is fixed, and the release note now carries the review's id. Rewriting the conflict step dropped the sha the worker has to merge.
+
+What holds: in the merge arm every skill command fills <T> with <A>, so the pass path fast-forwards rip-swarm/review-<A> and the re-check and shortfall paths delete that branch with git branch -D after switching back to rip-swarm/integration. "Not worth pursuing" rejects A, and that reject cascades over the chain. The release note and the message are review <R> cannot build on <sha>: conflict.
+
+### Minor
+
+#### m1. The conflict rebase no longer names the sha
+
+§11 left the conflict path on today's steps. Those steps post a rebase whose body is Merge <SHA> onto rip-swarm/integration and resolve the conflict; the resolution is the work, with SHA taken from the OUTCOME= line, and then message the worker. Revision 4 replaces that with "Post the rebase with --fixes <A>."
+
+A fixes task builds on the sha its body names. With no sha, BUILD_ON is empty and the worker resets onto rip-swarm/integration instead of merging the head. The rebase completes without the chain's commits, and the next review reads that tree. The shortfall step kept its sha ("building on SHA") and dropped the rest of today's sentence, the gap to close.
+
+Fix. The conflict body stays today's sentence, with --fixes <A> and SHA from the OUTCOME= line, and the worker is still messaged. The shortfall body names that same sha and the gap.
+
+---
+
+## 16. Dispositions (revision 6, 2026-09-27)
+
+| Finding | Disposition | Where |
+|---|---|---|
+| m1. The conflict rebase no longer names the sha | Accepted. Revision 5 had restored today's rebase body with `<SHA>` from the `OUTCOME=` line. Revision 6 adds the rest. The conflict step messages a worker again: the author of `A`, not the head's completer. In a chain the head is a review, and its completer is a reviewer, who is refused every fix (§5.3). The shortfall body names the same `SHA` and the gap to close, as today's *Falls short* step 2 does. | §5.6 `merge` steps 4 and 5 |
