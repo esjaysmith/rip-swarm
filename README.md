@@ -47,9 +47,10 @@ All live in `skills/rip-swarm/scripts/` and run as `python3 <script> …` from a
 |--------|---------|
 | `join.py` / `leave.py` | Become worker or master; leave cleanly |
 | `wait.py` | Block (in the background) until there is something to do; prints `wake <reason>` |
-| `inbox.py` | Post a task (`--after`, `--fixes`) |
-| `claim.py` | Claim / heartbeat / complete / release / reject |
+| `inbox.py` | Post a task (`--after`, `--fixes`, `--kind`, `--min-reviews`, `--reviews`) |
+| `claim.py` | Claim / heartbeat (`--loop`, `--stop`) / complete (`--verdict`) / release / reject (`--cascade`) |
 | `accept.py` | Master: record a merged, accepted task |
+| `reviews.py` | Read-only: the next step of a reviewed artifact's review chain |
 | `message.py` / `messages.py` | Send a message / read unread ones (`--to ID --new`) |
 | `sync.py` / `status.py` | Refresh the clone / read-only doctor |
 | `promote.py`, `lookback.py`, `init.py`, `version.py` | Baton handoff, reports, manual hive setup, version |
@@ -70,6 +71,7 @@ PYTHONPATH=skills/rip-swarm python3 -m unittest discover -s tests
 
 ## Docs
 
+- [docs/specs/2026-09-26-execution-proposals.md](docs/specs/2026-09-26-execution-proposals.md): one-publish cascade, heartbeat loop, no completion message, minimum review rounds per artifact kind
 - [docs/specs/2026-09-26-roles-and-install.md](docs/specs/2026-09-26-roles-and-install.md): roles and install spec (approved), with its review history
 - [docs/specs/2026-09-17-design-spec.md](docs/specs/2026-09-17-design-spec.md): protocol spec v0.2
 - [docs/plans/2026-09-25-first-trial.md](docs/plans/2026-09-25-first-trial.md): first trial runbook

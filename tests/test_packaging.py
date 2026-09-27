@@ -407,6 +407,14 @@ class TestPackaging(unittest.TestCase):
         for needle in ("agents/<id>/member.json", "accepted/<task_id>.json", "`after`", "/swarm-master"):
             self.assertIn(needle, text)
 
+    def test_docs_name_the_execution_proposals(self):
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("`reviews.py`", readme)
+        self.assertIn("docs/specs/2026-09-26-execution-proposals.md", readme)
+        protocol = (SKILLS / "rip-swarm" / "templates" / "_swarm" / "PROTOCOL.md").read_text(encoding="utf-8")
+        for needle in ("min_reviews", "reject --cascade", "--verdict"):
+            self.assertIn(needle, protocol)
+
 
 if __name__ == "__main__":
     unittest.main()
