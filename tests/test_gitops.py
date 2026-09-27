@@ -766,6 +766,10 @@ class TestGitops(unittest.TestCase):
             "",
         )
         self.assertFalse((self.ha / "UNRELATED_LEAK.txt").exists())
+        _git(self.ha, "fetch")
+        listed = self._remote_tree(self.ha)
+        self.assertNotIn("UNRELATED_LEAK.txt", listed)
+        self.assertNotIn(f"claims/{self.task['id']}.json", listed)
 
     def test_a_callable_allowlist_is_read_after_the_op(self):
         from rip_swarm.gitops import GitopsError
@@ -792,9 +796,7 @@ class TestGitops(unittest.TestCase):
             publish(self.ha, task_id="__none__", op=leak, message="leak", agent="alice",
                     now=T0, allow=lambda: ["lookback/late.md"])
         _git(self.ha, "fetch")
-        listed = self._remote_tree(self.ha)
-        self.assertNotIn("UNRELATED_LEAK.txt", listed)
-        self.assertNotIn(f"claims/{self.task['id']}.json", listed)
+        self.assertNotIn("lookback/other.md", self._remote_tree(self.ha))
 
     def test_pre_existing_scratch_file_is_never_swept_into_a_commit(self):
         # An untracked file that predates the op makes the hive dirty, so publish
