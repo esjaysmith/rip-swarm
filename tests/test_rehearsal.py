@@ -285,9 +285,25 @@ class Master(Session):
         return "error"
 
     def reject(self, task, note):
-        rc, out = cli("reject", "--hive", self.hive, "--agent", self.agent, "--task", task,
-                      "--note", note, at=self.now)
-        assert rc == 0, out
+        rc, err = self.try_reject(task, note)
+        assert rc == 0, err
+
+    def try_reject(self, task, note):
+        """`claim.py reject` as the skill runs it: (exit code, stderr)."""
+        err = io.StringIO()
+        rc, _ = cli("reject", "--hive", self.hive, "--agent", self.agent, "--task", task,
+                    "--note", note, at=self.now, err=err)
+        return rc, err.getvalue()
+
+    def reject_review(self, review, note):
+        """A reject of `REVIEW` in the cannot-build arms. Exit 2 `held by`, or
+        `lost race` when this clone had not seen the claim yet: another worker
+        claimed it again; go back to wait (final review m5)."""
+        rc, err = self.try_reject(review, note)
+        if rc == 2 and (f"{review} is held by " in err or "lost race on remote tip" in err):
+            return [f"wait {review}"]
+        assert rc == 0, err
+        return [f"reject {review}"]
 
     def handle_reject(self, task, wanted=(), **arms):
         """`wake task-finished <task> reject` per /swarm-master §6, step by step.
@@ -433,8 +449,10 @@ class Master(Session):
         says a dirty `WORKTREE` holds only leftovers of the master's own check.
         Returns what it did: `review <id>`, `revise <id>`, `rebase <id>`,
         `reject <id>`, `post <id>`, `refused <id>` (a replacement below the profile's
-        floor, posted again), `accepted`, `short <id>`, `moved`, `restart`,
-        or an OUTCOME (`dirty`, `error`)."""
+        floor, posted again), `accepted`, `short <id>`, `moved`, `restart`, `clean`
+        (item 3's DIRTY:, cleaned and run again), `report <id>` (a release note
+        that names another sha than the review's body: stop), `wait <id>` (a
+        reject of a review someone claimed again), or an OUTCOME (`dirty`, `error`)."""
         sync(self.hive)
         arms = dict(check=check, judge=judge, worth=worth, wanted=wanted, leftovers=leftovers)
         line = self.reviews(task)
@@ -442,10 +460,14 @@ class Master(Session):
         title = self.inbox(a)["title"]
         if nxt in ("post-rebase", "reject-review"):                                # arm 1
             done = []
+            if nxt == "post-rebase" and line["SHA"] != self.body_sha(line["REVIEW"]):
+                return [f"report {line['REVIEW']}"]                                # a worker slipped: stop
             if nxt == "post-rebase" and not self.is_commit(line["SHA"]):           # no rebase can build
-                self.reject(line["REVIEW"], f"review {line['REVIEW']} cannot build: "
-                                            f"{line['SHA']} is not a commit")
-                return [f"reject {line['REVIEW']}", *self.chain_wake(task, **arms)]  # run it again
+                done = self.reject_review(line["REVIEW"], f"review {line['REVIEW']} cannot build: "
+                                                          f"{line['SHA']} is not a commit")
+                if done[0].startswith("wait "):
+                    return done
+                return [*done, *self.chain_wake(task, **arms)]                     # run it again
             if nxt == "post-rebase":
                 reb = self.post(f"Rebase {title} onto rip-swarm/integration", "--fixes", a,
                                 "--body", f"Merge {line['SHA']} onto rip-swarm/integration and "
@@ -454,8 +476,7 @@ class Master(Session):
             else:                                                                  # posted before a crash
                 board = read_board(self.hive, self.now)
                 reb = max((v for v in chain(board, a) if v.fixes == a), key=posting_order).task_id
-            self.reject(line["REVIEW"], f"superseded by rebase {reb}")
-            return done + [f"reject {line['REVIEW']}"]
+            return done + self.reject_review(line["REVIEW"], f"superseded by rebase {reb}")
         if nxt in ("post-review", "post-revise", "merge") \
                 and self.inbox(head).get("reviews"):                               # arm 2
             if not self.is_commit(line["SHA"]):                                    # `git show` fails:
@@ -518,10 +539,13 @@ class Master(Session):
             if (again["NEXT"], again["HEAD"], again["SHA"]) != ("merge", line["HEAD"], line["SHA"]):
                 assert self._ok("switch", "rip-swarm/integration") and self._ok("branch", "-D", review)
                 return ["moved", *self.chain_wake(a, **arms)]                      # act on the new line
-            if git(self.wt, "status", "--porcelain"):                              # 6.3: Passes item 1
-                return ["dirty"]
+            done = []
+            while git(self.wt, "status", "--porcelain"):                           # 6.3: DIRTY:
+                git(self.wt, "reset", "-q", "--hard")                              # remove the check's
+                git(self.wt, "clean", "-q", "-fd")                                 # leftovers, then run
+                done.append("clean")                                               # the command again
             if git(self.wt, "rev-parse", "rip-swarm/integration") != self.last_tip:
-                return ["restart", *self.merge_arm(a, line, **arms)]               # MOVED: from 6.1
+                return [*done, "restart", *self.merge_arm(a, line, **arms)]        # MOVED: from 6.1
             assert (self._ok("switch", "rip-swarm/integration")
                     and self._ok("merge", "--ff-only", review) and self._ok("branch", "-d", review))
             new_tip = git(self.wt, "rev-parse", "HEAD")
@@ -529,7 +553,7 @@ class Master(Session):
                 rc, out = cli("accept", "--hive", self.hive, "--agent", self.agent, "--task", tid,
                               "--integration-sha", new_tip, at=self.now)
                 assert rc == 0, out
-            return ["accepted"]
+            return done + ["accepted"]
         assert self._ok("switch", "rip-swarm/integration") and self._ok("branch", "-D", review)
         self.loop_stop()                                                           # 6.5, 6.6
         if worth:                                                                  # 6.5
@@ -1278,6 +1302,78 @@ class TestRehearsal(unittest.TestCase):
         self.assertEqual(self.m.tick(), Wake("message"))
         self.assertEqual(self.m.handle_messages(), [f"reject {r1}"])               # NEXT=reject-review
         self.assertEqual(self._rebases(a), [f])
+
+    def test_a_release_note_that_names_another_sha_is_reported(self):
+        # Final review m4: a rebase merges the note's sha. A note that names
+        # another commit than the review's body is a worker's slip: report it
+        # and post nothing.
+        a = self._artifact(1)
+        self._write_artifact(a)
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{a} complete"))
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.assertEqual(self.w2.claim(r1), 0)
+        wrong = git(self.w2.wt, "rev-parse", "--short", "rip-swarm/integration")  # HEAD, not the body's
+        self.assertNotEqual(wrong, self.w2.body_sha(r1))
+        rc, out = cli("release", "--hive", self.w2.hive, "--task", r1, "--agent", self.w2.agent,
+                      "--note", f"review {r1} cannot build on {wrong}: conflict", at=self.w2.now)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} release"))
+        self.assertEqual(self.m.reviews(r1)["NEXT"], "post-rebase")
+        self.assertEqual(self.m.handle_release(r1), [f"report {r1}"])
+        self.assertEqual(self._rebases(a), [])
+        self.assertFalse(any((self.m.hive / "claims").glob(f"{r1}.reject.*.json")))
+
+    def test_a_review_claimed_again_before_its_reject_waits_for_its_next_wake(self):
+        # Final review m5: rejecting the released review exits 2 when another
+        # worker claimed it again after the helper read the board (while it is
+        # claimed, the helper says wait). That is not a failure: the rebase is
+        # posted, and that worker's own release wake rejects the review.
+        a, sa, r1 = self._conflicting_review(message=False)
+        w3 = Session(join(self.repo, role="worker", harness="grok", now=T0))
+        w3.now += timedelta(minutes=1)                                             # a later second
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} release"))
+        post = self.m.post
+
+        def post_then_claimed(title, *extra):
+            tid = post(title, *extra)
+            if title.startswith("Rebase "):
+                self.assertEqual(w3.claim(r1), 0)                                  # between post and reject
+            return tid
+
+        with mock.patch.object(self.m, "post", post_then_claimed):
+            done = self.m.handle_release(r1)
+        [f] = self._rebases(a)
+        self.assertEqual(done, [f"rebase {f}", f"wait {r1}"])
+        rc, out = cli("release", "--hive", w3.hive, "--task", r1, "--agent", w3.agent, "--note",
+                      f"review {r1} cannot build on {sa}: conflict", at=w3.now)   # it cannot build either
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} release"))
+        self.assertEqual(self.m.handle_release(r1), [f"reject {r1}"])              # NEXT=reject-review
+        self.assertEqual(self._rebases(a), [f])
+
+    def test_leftovers_found_by_the_fast_forward_are_cleaned_and_it_runs_again(self):
+        # Final review m6: merge item 3 runs *Passes* item 1, whose DIRTY:
+        # means remove the check's leftovers and run it again; the whole
+        # chain is then accepted.
+        a = self._artifact(1)
+        self._write_artifact(a)
+        self.m.tick()
+        [r1] = self._ids(self.m.handle_complete(a, None), "review")
+        self.w2.review(r1, "clean", "\n## Review 1\nno findings\n")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{r1} complete"))
+
+        def check(wt):                                   # passes, but leaves its traces behind
+            (wt / "check.log").write_text("ok\n", encoding="utf-8")
+            (wt / "spec.md").write_text("scribbled\n", encoding="utf-8")
+            return True
+
+        self.assertEqual(self.m.handle_complete(r1, check), ["clean", "accepted"])
+        self.assertFalse((self.m.wt / "check.log").exists())
+        self.assertEqual([(self.m.hive / "accepted" / f"{t}.json").exists() for t in (r1, a)],
+                         [True, True])
+        self.assertNotIn("scribbled", self._spec())
+        self.assertEqual(self.m.loop, ["start", "stop"])
+        self.assertEqual(self.m.tick(), Wake("all-complete"))
 
     def test_a_dirty_merge_restarts_the_arm_and_accepts_the_whole_chain(self):
         # Grok review 2, M2: ordinary step 7's "run step 4 again" leads to

@@ -379,6 +379,37 @@ class TestPackaging(unittest.TestCase):
         self.assertIn("If `git show` fails because `SHA` is not a commit", arm_2)
         self.assertIn("that is `merge` item 8's case", arm_2)
 
+    def test_master_checks_the_note_sha_against_the_review_body(self):
+        # Final review m4: a note naming another sha than the review's body
+        # is a worker's slip; the master reports it before posting a rebase.
+        text = self._text("swarm-master")
+        chains = self._section(text, "### Review chains", "### `wake task-finished <T> release`")
+        rebase = self._section(chains, "- `post-rebase`:", "- `reject-review`:")
+        grep = '''HIVE=<HIVE>; grep -oE 'Build on [0-9a-f]+' "$HIVE/inbox/<REVIEW>.json"'''
+        for needle in (grep, "report both shas to the operator and stop, and post nothing"):
+            self.assertIn(needle, rebase)
+        self.assertLess(rebase.index(grep), rebase.index("*post-review*'s command"))
+        self.assertLess(rebase.index(grep), rebase.index("Otherwise post a rebase"))
+
+    def test_master_waits_when_a_released_review_is_claimed_again(self):
+        # Final review m5: exit 2 from rejecting REVIEW, because a worker
+        # claimed it again, is not a failure; its next wake runs the helper.
+        text = self._text("swarm-master")
+        chains = self._section(text, "### Review chains", "### `wake task-finished <T> release`")
+        for needle in ("An exit 2 from rejecting `REVIEW` in these arms that says "
+                       "`<REVIEW> is held by <agent>`, or `lost race on remote tip`, is not a failure",
+                       "Go back to wait. The next `release` or `complete` wake of `REVIEW` runs the helper again",
+                       "Any other exit 2 is a failure: report it to the operator and stop."):
+            self.assertIn(needle, chains)
+
+    def test_master_merge_arm_cleans_up_on_dirty_at_the_fast_forward(self):
+        # Final review m6: item 3 runs *Passes* item 1; DIRTY: there is cleaned
+        # up and the command run again, as step 9 says.
+        text = self._text("swarm-master")
+        merge = self._section(text, "6. **`merge`.**", "7. **`OUTCOME=dirty`**")
+        self.assertIn("On `DIRTY:`, remove your acceptance check's leftovers and run the command "
+                      "again, as step 9 says.", merge)
+
     def test_master_merge_arm_resyncs_before_comparing(self):
         # Fix round 1, F2: reviews.py reads the local clone, which only a
         # heartbeat (one-shot or the loop's own publishes) fetches and
