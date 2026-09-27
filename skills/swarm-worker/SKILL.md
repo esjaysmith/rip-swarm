@@ -67,6 +67,8 @@ Only a line that starts with `wake ` is a wake. A harness timeout, a "moved to b
 
 Every git command you run for a task is `WORKTREE=<WORKTREE>; git -C "$WORKTREE" …`: pinned to the worktree, with `WORKTREE` assigned in the same command.
 
+If `<HIVE>/inbox/<id>.json` has `"reviews"`, this is a review task: follow **Review tasks** below instead of steps 1–6.
+
 1. Start the task from `rip-swarm/integration`. Your branch is reused from task to task, so it may still carry an earlier task's commits that were rejected or never accepted. They must not ride into this result. Fill in the first line and run this as **one** command. Run this block **exactly once** per task, right after the claim succeeds (a `SYNC=dirty` run touches nothing, so the re-run it asks for below counts as the same run); never after you have started or committed work for this task (for example after a context reset): it would move this task's commits to `refs/rip-swarm/prev/…`, out of the result, or commit a half-resolved conflict as leftovers. `BUILD_ON` is the sha to build on: the one a task with `fixes` set names in its body, or any sha a task body tells you to build on. For an ordinary task leave it empty (`BUILD_ON=`).
    ```bash
    WORKTREE=<WORKTREE>; AGENT=<AGENT>; BUILD_ON=<sha or nothing>
@@ -100,7 +102,7 @@ Every git command you run for a task is `WORKTREE=<WORKTREE>; git -C "$WORKTREE"
 
    Then the merge of `BUILD_ON` (`BUILD=`), which the block always runs when `BUILD_ON` is set:
    - `BUILD=none` (an ordinary task) or `BUILD=merged`: carry on.
-   - `BUILD=conflict`: the conflict **is the work** (a task with `fixes` set, or one whose body names a sha). `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` lists the files. Resolve them in `WORKTREE`, then stage everything and commit the merge without opening an editor: `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit --no-edit`. Release only if the resolution is beyond the task, with a note saying why.
+   - `BUILD=conflict`: the conflict **is the work** (a task with `fixes` set, or one whose body names a sha; never in a review task: see **Review tasks**). `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` lists the files. Resolve them in `WORKTREE`, then stage everything and commit the merge without opening an editor: `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit --no-edit`. Release only if the resolution is beyond the task, with a note saying why.
    - An ordinary task cannot conflict here: its branch is reset onto integration rather than merged. If a merge of integration ever does stop on a conflict, handle it like `SYNC=error` above with the note `cannot merge integration: <files>`.
 2. Do the task in `WORKTREE` only, touching only what the task body allows.
 3. Heartbeat before each long step: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT"`. Around a long edit or test run, start the heartbeat loop in the background instead, the way section 3 starts `wait`:

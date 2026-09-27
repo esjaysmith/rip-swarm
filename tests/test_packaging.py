@@ -318,6 +318,66 @@ class TestPackaging(unittest.TestCase):
                        'scripts/reviews.py" --hive "$HIVE" --task ID', "(chain of <A>)"):
             self.assertIn(needle, ref)
 
+    def test_worker_review_pointer_precedes_step_one(self):
+        # Fix round 1, F1: steps 1-6 and the BUILD=conflict bullet apply to
+        # ordinary tasks; a review task is routed away before step 1 runs.
+        text = self._text("swarm-worker")
+        section = self._section(text, "## 5. Do a claimed task", "## 6. Leave")
+        pointer = 'follow **Review tasks** below instead of steps 1–6'
+        for needle in (pointer, "never in a review task: see **Review tasks**"):
+            self.assertIn(needle, section)
+        self.assertLess(section.index(pointer),
+                         section.index("1. Start the task from `rip-swarm/integration`"))
+
+    def test_master_merge_arm_resyncs_before_comparing(self):
+        # Fix round 1, F2: reviews.py reads the local clone, which only a
+        # heartbeat (one-shot or the loop's own publishes) fetches and
+        # fast-forwards, so the clone must be resynced before the compare.
+        text = self._text("swarm-master")
+        merge = self._section(text, "6. **`merge`.**", "7. **`OUTCOME=dirty`**")
+        stop_then_beat = "stop the heartbeat loop, then heartbeat once"
+        beat_cmd = 'python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task orchestrator --agent "$AGENT"'
+        rerun = "run the helper with `--task <A>` again **before** the fast-forward"
+        item3 = "Run the *Passes* item 1 command with `T=<A>` and the `TIP` of the `OUTCOME=` line; the heartbeat loop is already stopped"
+        for needle in (stop_then_beat, beat_cmd, rerun, item3,
+                       "only this command or the loop's own publishes fetch and fast-forward it",
+                       "exit 2 means the baton is gone, as section 2 says"):
+            self.assertIn(needle, merge)
+        self.assertLess(merge.index(stop_then_beat), merge.index(beat_cmd))
+        self.assertLess(merge.index(beat_cmd), merge.index(rerun))
+        self.assertLess(merge.index(rerun), merge.index(item3))
+
+    def test_master_merge_arm_restarts_on_moved(self):
+        # Fix round 1, F4: MOVED from the fast-forward command must restart
+        # this arm at item 1, not fall through to plain step 9's own advice.
+        text = self._text("swarm-master")
+        merge = self._section(text, "6. **`merge`.**", "7. **`OUTCOME=dirty`**")
+        self.assertIn("On `MOVED:`, restart this merge arm from item 1", merge)
+        self.assertIn("leaving `CHAIN` unaccepted forever", merge)
+
+    def test_master_merge_arm_replaces_the_whole_chain_before_rejecting(self):
+        # Fix round 1, F3: "Not worth pursuing" must run the reject handler's
+        # step 2 for A and its still-wanted dependents before A is rejected,
+        # since the reject handler itself skips step 2 once A has a chain.
+        text = self._text("swarm-master")
+        merge = self._section(text, "6. **`merge`.**", "7. **`OUTCOME=dirty`**")
+        run_step_2 = "run the reject handler's step 2 in full, with `<T>` as `A`, before rejecting it"
+        dependents = "post each of `A`'s dependents that is not rejected yet and is still wanted"
+        reject_a = 'python3 "$RS/scripts/claim.py" reject --hive "$HIVE" --task <A> --agent "$AGENT" --note "<why>"'
+        for needle in (run_step_2, dependents, reject_a,
+                       "because `A` now has a chain, skips step 2 itself"):
+            self.assertIn(needle, merge)
+        self.assertLess(merge.index(run_step_2), merge.index(reject_a))
+        self.assertLess(merge.index(dependents), merge.index(reject_a))
+
+    def test_master_merge_arm_stops_the_loop_on_every_path(self):
+        # Fix round 1, F5: every hive write in the merge arm is preceded by
+        # stopping the heartbeat loop, stated once in the preamble.
+        text = self._text("swarm-master")
+        merge = self._section(text, "6. **`merge`.**", "7. **`OUTCOME=dirty`**")
+        self.assertIn("Stop the heartbeat loop before any hive write in this arm, on every path", merge)
+        self.assertIn("items 4, 7 and 8 do not repeat it below, but it applies there too", merge)
+
     def test_readme_documents_install_and_roles(self):
         text = (REPO / "README.md").read_text(encoding="utf-8")
         for needle in ("npx skills add esjaysmith/rip-swarm -g -a claude-code -a grok -s '*' -y",
