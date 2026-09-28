@@ -12,6 +12,21 @@
 4. **Leases:** background `wait` and heartbeats keep claims alive through long reads.
 5. **Friction:** every workaround is a finding.
 
+## Known limits
+
+Watch for these; each is known and not a trial failure on its own.
+
+- **Message cursor.** The cursor is `(ts, id)`. A message created earlier but pushed later than one already read can be skipped. Masters are driven by tombstones, so the board is not affected.
+- **One state file per hive clone.** Two agents pointed at the same hand-made hive clone overwrite each other's state. The role skills give each agent its own clone.
+- **Wait lock.** The lock is taken before the pid is written, so two waits started within milliseconds of each other can both run. Worst case: a duplicate wake.
+- **`wait --profile`.** `wait` ignores `--profile`: heartbeat and idle timing use the default profile, which is what `join` uses.
+- **`refs/rip-swarm/prev/*`.** These refs are never pruned. There is one per task that needed a reset.
+- **Expiry wakes.** An unstolen expiry and the later steal each produce an `expired` wake, and tombstones are reported in file-name order. The master's handler for these is a no-op.
+- **Pending reject cascade.** While a task is still blocked on a rejected one, the master's `wait` returns on its first tick with that reject, every time, and `idle-board` and `timeout` wait until the cascade is done.
+- **Replacement titles.** A rerun of the master's reject handler finds an earlier replacement only by its title suffix ` (replaces <id>)`. A replacement titled otherwise is posted a second time.
+- **Reject with nothing waiting on it.** Its wake comes once. A master that dies before posting that reject's replacement, or before deciding its orphaned `fixes` target, is not woken for it again: check `status` after a master restart.
+- **Cascade-rejected follow-up.** A reject noted `dependency <id> rejected` runs only the cascade step. If that task also `fixes` some `X` and nothing replaces it, `X` is never decided and `all-complete` never fires. The master never posts a follow-up with `--after`, so only a hand-made plan hits this.
+
 ## Success criteria
 
 | # | Criterion | Evidence |

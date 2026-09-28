@@ -81,7 +81,7 @@ Rules for tasks and claims:
 - Do not edit the project until `claim` prints `claimed … until …`.
 - Heartbeat at or before half the lease.
 - `reject` by the baton holder drops a task that has no live claim. Workers may reject only what they hold.
-- `accept` is master-only and idempotent: a second call prints `already accepted`.
+- `accept` is master-only and idempotent: a second call prints `already accepted`. It refuses a rejected task with exit 2.
 
 ## Promote, lookback
 

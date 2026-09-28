@@ -1,6 +1,7 @@
 # tests/test_rehearsal.py — model-free rehearsal: one master, two workers (spec §11)
 import io
 import json
+import re
 import subprocess
 import tempfile
 import unittest
@@ -24,9 +25,9 @@ def run(cwd, *args):
     return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
 
 
-def cli(*argv, at=T0):
+def cli(*argv, at=T0, err=None):
     out = io.StringIO()
-    with redirect_stdout(out), redirect_stderr(io.StringIO()), \
+    with redirect_stdout(out), redirect_stderr(io.StringIO() if err is None else err), \
             mock.patch("rip_swarm.cli.now_utc", return_value=at):
         rc = main([str(a) for a in argv])
     return rc, out.getvalue().strip()
@@ -135,8 +136,11 @@ class Master(Session):
             parent = json.loads((self.hive / "inbox" / f"{child}.json").read_text()).get("fixes")
             if not parent:
                 break
+            err = io.StringIO()
             rc, out = cli("accept", "--hive", self.hive, "--agent", self.agent, "--task", parent,
-                          "--integration-sha", new_tip, "--via", child, at=self.now)
+                          "--integration-sha", new_tip, "--via", child, at=self.now, err=err)
+            if rc == 2 and f"{parent} is rejected; it cannot be accepted" in err.getvalue():
+                break                                                     # dropped: the walk stops
             assert rc == 0, out
             if out.startswith("already accepted"):
                 break
@@ -190,6 +194,72 @@ class Master(Session):
         rc, out = cli("reject", "--hive", self.hive, "--agent", self.agent, "--task", task,
                       "--note", note, at=self.now)
         assert rc == 0, out
+
+    def handle_reject(self, task, wanted=()):
+        """`wake task-finished <task> reject` per /swarm-master §6, step by step.
+
+        `wanted` is the model's call: the rejected tasks whose work is still
+        wanted. The orphan is always rejected here; the other choice is `review`.
+        Every step reads the board first, so a rerun does nothing twice.
+        Returns what it did."""
+        sync(self.hive)
+        board = read_board(self.hive, self.now)
+        done = []
+        stone = next((self.hive / "claims").glob(f"{task}.reject.*.json"))
+        note = json.loads(stone.read_text(encoding="utf-8")).get("note") or ""
+        root = not re.fullmatch(r"dependency \S+ rejected", note)                 # step 1
+        chain = self._downstream(board, task)
+        if root:                                                                   # step 2
+            replaced = {}
+            for old in [task, *(tid for tid in chain if not board[tid].rejected)]:
+                if old not in wanted:
+                    continue
+                dead = {task, *chain}                                              # step 4 rejects these
+                found = [r for r in self.replacements(old)
+                         if not board[r].rejected and not any(
+                             dep in dead or board[dep].rejected for dep in board[r].after)]
+                if found:
+                    replaced[old] = found[0]                                       # the first usable
+                    continue
+                inbox = json.loads((self.hive / "inbox" / f"{old}.json").read_text(encoding="utf-8"))
+                after = [replaced.get(dep, dep) for dep in board[old].after        # swap, then drop
+                         if dep in replaced or not (dep in dead or board[dep].rejected)]
+                extra = [arg for dep in after for arg in ("--after", dep)]
+                if inbox.get("body") is not None:
+                    extra += ["--body", inbox["body"]]
+                if inbox.get("fixes"):
+                    extra += ["--fixes", inbox["fixes"]]
+                replaced[old] = self.post(f"{board[old].title} (replaces {old})", *extra)
+                done.append(f"post {replaced[old]}")
+            board = read_board(self.hive, self.now)
+        x = board[task].fixes
+        if root and x and not board[x].settled and all(                           # step 3
+                view.settled for view in fixers(board, x) if view.task_id != task):
+            self.reject(x, "fix abandoned")
+            done.append(f"orphan {x}")
+        for tid in chain:                                                          # step 4
+            if not board[tid].rejected:
+                self.reject(tid, f"dependency {task} rejected")
+                done.append(f"reject {tid}")
+        return done
+
+    @staticmethod
+    def _downstream(board, task):
+        """Every task whose `after` chain leads to `task`, in dependency order."""
+        out, frontier = [], [task]
+        while frontier:
+            nxt = sorted(tid for tid, v in board.items()
+                         if tid not in out and any(dep in frontier for dep in v.after))
+            out.extend(nxt)
+            frontier = nxt
+        return out
+
+    def replacements(self, task):
+        """Inbox tasks titled `… (replaces <task>)`, per the handler's grep."""
+        sync(self.hive)
+        return sorted(p.stem for p in (self.hive / "inbox").glob("task_*.json")
+                      if json.loads(p.read_text(encoding="utf-8"))["title"]
+                      .endswith(f" (replaces {task})"))
 
 
 def says(text):
@@ -440,10 +510,137 @@ class TestRehearsal(unittest.TestCase):
         self.m.reject(d, f"dependency {t} rejected")                       # master A dies here
         b = Master(join(self.repo, role="master", harness="claude-code", now=LATER), now=LATER)
         self.assertEqual(b.tick(), Wake("task-finished", f"{d} reject"))    # E still waits on D
-        self.assertIsNone(b.tick())
+        self.assertEqual(b.tick(), Wake("task-finished", f"{d} reject"))    # until E is rejected
         b.reject(e, f"dependency {d} rejected")
         self.assertEqual(b.tick(), Wake("task-finished", f"{e} reject"))
         self.assertEqual(b.tick(), Wake("all-complete"))
+
+    def test_reject_cascade_survives_the_same_master_dying(self):
+        t = self.m.post("T")
+        d = self.m.post("D", "--after", t)
+        e = self.m.post("E", "--after", d)
+        self.m.reject(t, "not worth it")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{t} reject"))
+        self.m.reject(d, f"dependency {t} rejected")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{d} reject"))
+        # the session dies here; the same agent's next wait keeps its state file
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{d} reject"))
+        self.m.reject(e, f"dependency {d} rejected")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{e} reject"))
+        self.assertEqual(self.m.tick(), Wake("all-complete"))
+
+    def _chain(self):
+        t = self.m.post("T")
+        d = self.m.post("D", "--after", t)
+        e = self.m.post("E", "--after", d)
+        return t, d, e
+
+    def test_reject_handler_resumed_after_a_crash_posts_no_second_replacement(self):
+        t, d, e = self._chain()
+        self.m.reject(t, "wrong approach")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{t} reject"))
+        r = self.m.post(f"T (replaces {t})")                              # the session dies here
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{t} reject"))    # D still waits on T
+        self.m.handle_reject(t, wanted={t, d, e})
+        self.assertEqual(self.m.replacements(t), [r])
+        [d2], [e2] = self.m.replacements(d), self.m.replacements(e)
+        board = read_board(self.m.hive, T0)
+        self.assertEqual((board[d2].after, board[e2].after), ((r,), (d2,)))
+        self.assertTrue(board[d].rejected and board[e].rejected)
+        # The cascade's own tombstones wake the master; they change nothing.
+        for dep in sorted([d, e]):
+            self.assertEqual(self.m.tick(), Wake("task-finished", f"{dep} reject"))
+            self.assertEqual(self.m.handle_reject(dep, wanted={t, d, e}), [])
+        self.assertIsNone(self.m.tick())                                  # R, D2, E2 are the plan now
+        self.assertEqual(len(list((self.m.hive / "inbox").glob("task_*.json"))), 6)
+
+    def test_a_cascade_reject_posts_no_replacement_of_its_own(self):
+        t, d, e = self._chain()
+        self.m.reject(t, "not worth it")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{t} reject"))
+        self.assertEqual(self.m.handle_reject(t), [f"reject {d}", f"reject {e}"])
+        for dep in sorted([d, e]):
+            self.assertEqual(self.m.tick(), Wake("task-finished", f"{dep} reject"))
+            self.assertEqual(self.m.handle_reject(dep, wanted={d, e}), [])     # the note decides
+        self.assertEqual(self.m.replacements(d), [])
+        self.assertEqual(self.m.tick(), Wake("all-complete"))
+
+    def test_a_replacement_never_waits_on_a_rejected_task(self):
+        t, d, e = self._chain()
+        self.m.reject(t, "not needed")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{t} reject"))
+        self.m.handle_reject(t, wanted={d})                               # T is not wanted, D is
+        [d2] = self.m.replacements(d)
+        self.assertEqual(read_board(self.m.hive, T0)[d2].after, ())
+        for dep in sorted([d, e]):
+            self.assertEqual(self.m.tick(), Wake("task-finished", f"{dep} reject"))
+        self.assertIsNone(self.m.tick())                                  # no reject wake recurs
+
+    def test_a_replacement_drops_a_rejected_dependency_outside_the_chain(self):
+        t = self.m.post("T")
+        u = self.m.post("U")
+        d = self.m.post("D", "--after", t, "--after", u)
+        self.m.reject(t, "not needed")
+        self.m.reject(u, "not needed")
+        self.m.handle_reject(t, wanted={d})                               # T's wake comes first
+        [d2] = self.m.replacements(d)
+        self.assertEqual(read_board(self.m.hive, T0)[d2].after, ())
+
+    def test_a_dead_replacement_is_not_reused(self):
+        t, d, e = self._chain()
+        self.m.reject(t, "wrong approach")
+        stale = self.m.post(f"D (replaces {d})", "--after", t)            # an older run's slip
+        self.m.handle_reject(t, wanted={t, d})
+        found = self.m.replacements(d)
+        self.assertEqual(len(found), 2)
+        [fresh] = [r for r in found if r != stale]
+        self.assertEqual(read_board(self.m.hive, T0)[fresh].after, tuple(self.m.replacements(t)))
+        self.assertTrue(read_board(self.m.hive, T0)[stale].rejected)      # step 4 reached it
+        self.assertEqual(self.m.handle_reject(t, wanted={t, d}), [])      # the rerun keeps `fresh`
+
+    def test_replacing_a_follow_up_keeps_fixes_and_leaves_the_original(self):
+        t = self.m.post("T")
+        self.w1.tick()
+        self._done(self.w1, t, "wrong\n")
+        self.m.tick()
+        self.assertEqual(self.m.handle_complete(t, says("right\n")), "short")
+        f = self.m.post("Fix T", "--fixes", t, "--body", "t.txt must say right")
+        self.m.reject(f, "wrong approach")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{f} reject"))
+        done = self.m.handle_reject(f, wanted={f})
+        [r] = self.m.replacements(f)
+        self.assertEqual(done, [f"post {r}"])                             # no orphan step for T
+        doc = json.loads((self.m.hive / "inbox" / f"{r}.json").read_text(encoding="utf-8"))
+        self.assertEqual((doc["fixes"], doc["body"]), (t, "t.txt must say right"))
+        self.assertFalse(read_board(self.m.hive, T0)[t].settled)          # R decides T now
+        self.assertEqual(self.m.handle_reject(f, wanted={f}), [])
+
+    def test_the_fixes_walk_stops_at_a_rejected_original(self):
+        t = self.m.post("T")
+        self.w1.tick()
+        bad = self._done(self.w1, t, "wrong\n")
+        self.m.tick()
+        self.assertEqual(self.m.handle_complete(t, says("right\n")), "short")
+        f = self.m.post("Fix T", "--fixes", t)
+        self.m.reject(t, "dropped")                                        # while F is still open
+        self.assertEqual(self.w1.claim(f), 0)
+        self.assertEqual(self.w1.start_task(bad)[:2], ("reset", "merged"))
+        self.w1.work("t.txt", "right\n", "fix T")
+        self.w1.complete(f)
+        self.assertEqual(self.m.handle_complete(f, says("right\n")), "pass")
+        self.assertFalse((self.m.hive / "accepted" / f"{t}.json").exists())
+
+    def test_reject_handler_skips_an_orphan_already_settled(self):
+        t = self.m.post("T")
+        self.w1.tick()
+        self._done(self.w1, t, "wrong\n")
+        self.m.tick()
+        self.assertEqual(self.m.handle_complete(t, says("right\n")), "short")
+        f = self.m.post("Fix T", "--fixes", t)
+        self.m.reject(f, "not worth it")
+        self.assertEqual(self.m.tick(), Wake("task-finished", f"{f} reject"))
+        self.assertEqual(self.m.handle_reject(f), [f"orphan {t}"])
+        self.assertEqual(self.m.handle_reject(f), [])                     # the wake again: X is settled
 
     def test_badsha_is_rejected_untouched(self):
         t = self.m.post("T")
