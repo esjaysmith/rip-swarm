@@ -47,9 +47,10 @@ All live in `skills/rip-swarm/scripts/` and run as `python3 <script> …` from a
 |--------|---------|
 | `join.py` / `leave.py` | Become worker or master; leave cleanly |
 | `wait.py` | Block (in the background) until there is something to do; prints `wake <reason>` |
-| `inbox.py` | Post a task (`--after`, `--fixes`) |
-| `claim.py` | Claim / heartbeat / complete / release / reject |
+| `inbox.py` | Post a task (`--after`, `--fixes`, `--kind`, `--min-reviews`, `--reviews`) |
+| `claim.py` | Claim / heartbeat (`--loop`, `--stop`) / complete (`--verdict`) / release / reject (`--cascade`) |
 | `accept.py` | Master: record a merged, accepted task |
+| `reviews.py` | Read-only: the next step of a reviewed artifact's review chain |
 | `message.py` / `messages.py` | Send a message / read unread ones (`--to ID --new`) |
 | `sync.py` / `status.py` | Refresh the clone / read-only doctor |
 | `promote.py`, `lookback.py`, `init.py`, `version.py` | Baton handoff, reports, manual hive setup, version |
@@ -57,6 +58,16 @@ All live in `skills/rip-swarm/scripts/` and run as `python3 <script> …` from a
 The full reference is in [skills/rip-swarm/SKILL.md](skills/rip-swarm/SKILL.md).
 
 Exit codes: `0` ok, `1` failure, `2` refused (not yours, blocked, finished, or another master), `3` a `wait` is already running for this agent.
+
+## A stuck heartbeat loop
+
+`claim.py heartbeat --loop` keeps a lease alive while an agent works outside `wait`. It ends when it is stopped, when the lease is gone, or when the session that started it dies: it checks its parent processes every 30 seconds and exits 0 with a line saying why once they change. If a loop still outlives its session, for example on a system without `/proc` where only the direct parent is checked, the lease never expires, and a new master is refused while it holds the baton. Stop it from that agent's hive clone:
+
+```bash
+python3 skills/rip-swarm/scripts/claim.py heartbeat --hive <that agent's hive clone> --task <id or orchestrator> --agent <agent> --stop
+```
+
+The lease then runs out on its own, or the next heartbeat of a live session renews it.
 
 ## Hives created before 0.3
 
@@ -70,6 +81,7 @@ PYTHONPATH=skills/rip-swarm python3 -m unittest discover -s tests
 
 ## Docs
 
+- [docs/specs/2026-09-26-execution-proposals.md](docs/specs/2026-09-26-execution-proposals.md): one-publish cascade, heartbeat loop, no completion message, minimum review rounds per artifact kind
 - [docs/specs/2026-09-26-roles-and-install.md](docs/specs/2026-09-26-roles-and-install.md): roles and install spec (approved), with its review history
 - [docs/specs/2026-09-17-design-spec.md](docs/specs/2026-09-17-design-spec.md): protocol spec v0.2
 - [docs/plans/2026-09-25-first-trial.md](docs/plans/2026-09-25-first-trial.md): first trial runbook

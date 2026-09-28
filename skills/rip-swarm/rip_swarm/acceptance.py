@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rip_swarm.audit import append_claim_audit
-from rip_swarm.board import is_accepted, read_board
+from rip_swarm.board import downstream, is_accepted, read_board
 from rip_swarm.claim import ClaimDenied, _tombstone_candidates, tombstone_claim
 from rip_swarm.fold import Corrupt, Expired, Holder, active_holder
 from rip_swarm.ids import new_claim_id
@@ -15,6 +15,7 @@ from rip_swarm.inbox import InboxError, validate_task_id
 from rip_swarm.io import ExclExistsError, excl_create_json, read_json, write_json_to_new_path
 from rip_swarm.paths import HivePaths
 from rip_swarm.registry import require_agent
+from rip_swarm.reviews import chain_state
 from rip_swarm.timeutil import format_z
 
 _SHA = re.compile(r"[0-9a-f]{7,64}")
@@ -52,16 +53,32 @@ def accept_task(
 ) -> dict:
     """Write the create-only `accepted/<T>.json`. Idempotent: an existing record
     is `{"task_id": T, "already": True}` and nothing is written. A rejected task
-    is refused, `--via` or not: a reject is final (spec §7.4)."""
+    is refused, `--via` or not: a reject is final (spec §7.4). A reviewed
+    artifact (min_reviews >= 1) is refused until it is ready (execution
+    proposals §5.3)."""
     _require_task(hive, task_id)
     _require_master(hive, agent, now)
     if is_accepted(hive, task_id):
         return {"task_id": task_id, "already": True}
-    view = read_board(hive, now).get(task_id)
+    board = read_board(hive, now)
+    view = board.get(task_id)
     if view is None:                     # the board skips an inbox file it cannot parse
         raise ClaimDenied(f"inbox task {task_id} is unreadable")
     if view.rejected:
         raise ClaimDenied(f"{task_id} is rejected; it cannot be accepted")
+    if view.min_reviews >= 1:
+        # Execution proposals §5.5: `--via` does not bypass the rounds; the
+        # fixes walk ends at this refusal as it ends at a rejected task.
+        state = chain_state(hive, board, task_id)
+        if not state.ready:
+            raise ClaimDenied(
+                f"{task_id} needs {view.min_reviews} review rounds ending clean, has {state.rounds}"
+            )
+        # Ready only when reviews.py would say merge: no chain task is still
+        # open, claimed or blocked (neither completed nor rejected).
+        busy = next((v for v in state.tasks if not v.completed and not v.rejected), None)
+        if busy is not None:
+            raise ClaimDenied(f"{task_id} has chain work in progress: {busy.task_id}")
     if not _SHA.fullmatch(integration_sha or ""):
         raise ValueError(f"--integration-sha must be a hex commit id, got {integration_sha!r}")
     via = list(dict.fromkeys(via))
@@ -105,8 +122,18 @@ def master_reject(
         )
     if isinstance(held, Corrupt):
         raise ClaimDenied(f"{task_id} has a corrupt claim file: {held.error}")
+    return _write_reject(hive, rec=rec, agent=agent, task_id=task_id, note=note, now=now,
+                         expired=isinstance(held, Expired))
+
+
+def _write_reject(
+    hive: Path, *, rec: dict, agent: str, task_id: str, note: str | None,
+    now: datetime, expired: bool,
+) -> dict:
+    """One master reject tombstone for a task nobody holds. An expired claim is
+    tombstoned `expired` first."""
     path = HivePaths(hive).claim(task_id)
-    if isinstance(held, Expired):
+    if expired:
         old = read_json(path)
         tombstone_claim(path, "expired", now)
         append_claim_audit(hive, action="expired", claim_doc=old, now=now)
@@ -125,3 +152,44 @@ def master_reject(
             break
     append_claim_audit(hive, action="reject", claim_doc=body, now=now)
     return body
+
+
+def cascade_reject(hive: Path, *, agent: str, task_id: str, now: datetime) -> dict:
+    """Reject, in one call, every task a reject of `task_id` cascades to
+    (execution proposals §2): each gets the note `dependency <T> rejected`.
+    A task with a live claim is skipped, not failed; an accepted one is left
+    alone; one already rejected is reported as such. Every walked task is
+    checked before anything is written, so a corrupt claim refuses the whole
+    cascade."""
+    _require_task(hive, task_id)
+    rec = _require_master(hive, agent, now)
+    board = read_board(hive, now)
+    root = board.get(task_id)
+    if root is None:
+        raise ClaimDenied(f"inbox task {task_id} is unreadable")
+    if not root.rejected:
+        raise ClaimDenied(f"{task_id} is not rejected; reject it before --cascade")
+    todo: list[tuple[str, bool]] = []
+    already: list[str] = []
+    skipped: list[dict] = []
+    for tid, chain_of in downstream(board, task_id):
+        view = board[tid]
+        if view.rejected:
+            already.append(tid)
+            continue
+        if view.accepted:
+            continue
+        held = active_holder(hive, tid, now)
+        if isinstance(held, Holder):
+            skipped.append({"task_id": tid, "agent": held.agent,
+                            "expires_at": format_z(held.expires_at), "chain_of": chain_of})
+            continue
+        if isinstance(held, Corrupt):
+            raise ClaimDenied(f"{tid} has a corrupt claim file: {held.error}")
+        todo.append((tid, isinstance(held, Expired)))
+    note = f"dependency {task_id} rejected"
+    for tid, expired in todo:
+        _write_reject(hive, rec=rec, agent=agent, task_id=tid, note=note, now=now,
+                      expired=expired)
+    return {"root": task_id, "rejected": [tid for tid, _ in todo],
+            "already": already, "skipped": skipped}

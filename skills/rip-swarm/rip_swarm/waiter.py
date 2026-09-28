@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from rip_swarm.board import TaskView, list_tombstones, read_board
+from rip_swarm.board import TaskView, chain, list_tombstones, read_board
 from rip_swarm.claim import ClaimDenied, heartbeat
 from rip_swarm.fold import Expired, Holder, active_holder
 from rip_swarm.gitops import can_publish, publish_or_apply, sync
@@ -137,7 +137,12 @@ def _master_tick(
 
 
 def _blocking_reject(board: dict[str, TaskView]) -> str | None:
-    """The first rejected task (sorted) that an unsettled task lists in `after`."""
+    """The first rejected task (sorted) that the board says is not done
+    cascading: an unsettled task lists it in `after`, or it is a reviewed
+    artifact with a chain task that is neither accepted nor rejected and has no
+    live claim (execution proposals §5.5). A chain task claimed when the
+    artifact was rejected is left alone until its claim ends, so a live claim
+    never makes the wake spin."""
     waited_on = {
         dep
         for view in board.values()
@@ -145,6 +150,11 @@ def _blocking_reject(board: dict[str, TaskView]) -> str | None:
         for dep in view.after
         if dep in board and board[dep].rejected
     }
+    for tid, view in board.items():
+        if view.rejected and view.min_reviews >= 1 and any(
+            not task.settled and task.claim != "live" for task in chain(board, tid)
+        ):
+            waited_on.add(tid)
     return min(waited_on) if waited_on else None
 
 

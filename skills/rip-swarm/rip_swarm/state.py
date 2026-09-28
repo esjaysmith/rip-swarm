@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 from rip_swarm.board import is_accepted, list_tombstones
@@ -107,21 +108,34 @@ def _alive(pid: int) -> bool:
     return True
 
 
+def create_pid_file(path: Path) -> bool:
+    """Create `path` holding this process's pid, or return False if it exists.
+    The pid is written to a temporary file first and hard-linked into place,
+    so another process sees no file or the whole pid, never an empty file
+    that it would take for a stale lock and remove."""
+    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+        try:
+            os.link(tmp, path)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        os.unlink(tmp)
+
+
 def acquire_wait_lock(hive: Path) -> Path:
     path = state_dir(hive) / LOCK_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     for _ in range(3):
-        try:
-            fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            pid = _read_pid(path)
-            if pid is not None and _alive(pid):
-                raise WaitRunning(pid) from None
-            path.unlink(missing_ok=True)
-            continue
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(str(os.getpid()))
-        return path
+        if create_pid_file(path):
+            return path
+        pid = _read_pid(path)
+        if pid is not None and _alive(pid):
+            raise WaitRunning(pid)
+        path.unlink(missing_ok=True)
     raise WaitRunning(_read_pid(path) or 0)
 
 

@@ -4,13 +4,15 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
+import time
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 
 from rip_swarm import __version__
-from rip_swarm.acceptance import accept_task, holds_baton, master_reject
+from rip_swarm.acceptance import accept_task, cascade_reject, holds_baton, master_reject
 from rip_swarm.board import read_board
 from rip_swarm.claim import ClaimDenied, complete, heartbeat, reject, release
 from rip_swarm.fold import Holder, active_holder
@@ -29,13 +31,18 @@ from rip_swarm.inbox import create_task
 from rip_swarm.outbox import write_message
 from rip_swarm.init_hive import init_hive
 from rip_swarm.join import join, leave
+from rip_swarm.lease import (
+    LoopRunning, LoopStop, acquire_loop_lock, heartbeat_loop, lease_ttl, release_loop_lock,
+    session_ancestry, stop_loop,
+)
 from rip_swarm.lookback import write_lookback
 from rip_swarm.messages import format_messages, list_messages, unread_messages
 from rip_swarm.orchestrator import heartbeat_orchestrator, promote, release_orchestrator
 from rip_swarm.paths import resolve_hive
 from rip_swarm.policy import try_claim_with_policy
-from rip_swarm.profile import load_profile
+from rip_swarm.profile import load_profile, min_reviews_floors
 from rip_swarm.registry import require_agent
+from rip_swarm.reviews import next_step
 from rip_swarm.state import WaitRunning, ensure_state, mark_seen_open, save_state
 from rip_swarm.status import format_status, status_report
 from rip_swarm.timeutil import now_utc, parse_duration
@@ -47,6 +54,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = _dispatch(args)
     except WaitRunning as e:
+        print(e, file=sys.stderr)
+        return 3
+    except LoopRunning as e:
         print(e, file=sys.stderr)
         return 3
     except ClaimDenied as e:
@@ -98,6 +108,10 @@ def _parser() -> argparse.ArgumentParser:
     inbox_p.add_argument("--after", action="append", default=[],
                          help="task id this task waits on (repeatable; must exist)")
     inbox_p.add_argument("--fixes", help="task id this follow-up or rebase task fixes")
+    inbox_p.add_argument("--kind", help="artifact kind: a key of the profile's min_reviews")
+    inbox_p.add_argument("--min-reviews", dest="min_reviews",
+                         help="review rounds this artifact needs (>= the profile's number)")
+    inbox_p.add_argument("--reviews", help="task id of the artifact this review task reviews")
 
     claim_p = sub.add_parser("claim", parents=[common], help="claim a task")
     claim_p.add_argument("--task", required=True)
@@ -105,11 +119,16 @@ def _parser() -> argparse.ArgumentParser:
 
     hb_p = sub.add_parser("heartbeat", parents=[common], help="extend a held claim")
     hb_p.add_argument("--task", required=True)
+    hb_p.add_argument("--loop", action="store_true",
+                      help="heartbeat each time half the lease is gone, until stopped")
+    hb_p.add_argument("--stop", action="store_true",
+                      help="stop the running --loop for --task in this hive clone")
 
     complete_p = sub.add_parser("complete", parents=[common], help="complete a held claim")
     complete_p.add_argument("--task", required=True)
     complete_p.add_argument("--result-ref", required=True)
     complete_p.add_argument("--note")
+    complete_p.add_argument("--verdict", help="review tasks only: clean or findings")
 
     for name, help_text in (
         ("release", "release a held claim"),
@@ -118,6 +137,11 @@ def _parser() -> argparse.ArgumentParser:
         p = sub.add_parser(name, parents=[common], help=help_text)
         p.add_argument("--task", required=True)
         p.add_argument("--note")
+
+    sub.choices["reject"].add_argument(
+        "--cascade", action="store_true",
+        help="baton holder: reject every task that waits on rejected --task, in one publish",
+    )
 
     acc_p = sub.add_parser(
         "accept", parents=[common],
@@ -143,6 +167,11 @@ def _parser() -> argparse.ArgumentParser:
     msg_p.add_argument("--body", required=True)
 
     sub.add_parser("status", parents=[common], help="read-only hive doctor")
+    rev_p = sub.add_parser(
+        "reviews", parents=[base],
+        help="read-only: the next step of a reviewed artifact's review chain",
+    )
+    rev_p.add_argument("--task", required=True)
     sub.add_parser(
         "sync", parents=[base], help="fetch and fast-forward the hive to origin/swarm"
     )
@@ -194,6 +223,8 @@ def _dispatch(args: argparse.Namespace) -> object:
         # unknown --profile behaves consistently (profile.py falls back).
         load_profile(hive, args.profile)
         return format_status(status_report(hive, now))
+    if args.command == "reviews":
+        return next_step(hive, read_board(hive, now), args.task).line()
     if args.command == "sync":
         return _sync(hive)
     if args.command == "wait":
@@ -228,6 +259,10 @@ def _dispatch(args: argparse.Namespace) -> object:
     if args.command == "claim":
         return _claim(args, hive, now, profile)
     if args.command == "heartbeat":
+        if args.stop:
+            return stop_loop(hive, _require(args.task, "--task"))
+        if args.loop:
+            return _heartbeat_loop(args, hive, profile)
         return _heartbeat(args, hive, now, profile)
     if args.command == "promote":
         return _promote(args, hive, now, profile)
@@ -308,6 +343,14 @@ def _require(value: str | None, flag: str) -> str:
     return str(value)
 
 
+def _whole_number(value: str | None, flag: str) -> int | None:
+    if value is None:
+        return None
+    if not str(value).isdigit():
+        raise ValueError(f"{flag} must be an integer >= 0, got {value!r}")
+    return int(value)
+
+
 def _resolve_harness(hive: Path, agent: str, given: str | None) -> str:
     """The registry is the source of truth for an agent's harness (§5 trust).
 
@@ -328,7 +371,11 @@ def _resolve_harness(hive: Path, agent: str, given: str | None) -> str:
 
 
 def _inbox_add(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
+    min_reviews = _whole_number(args.min_reviews, "--min-reviews")
+
     def op() -> dict:
+        # Read the profile inside the op, after publish fast-forwarded the hive.
+        floors = min_reviews_floors(load_profile(hive, args.profile)) if args.kind else None
         return create_task(
             hive,
             title=args.title,
@@ -337,6 +384,10 @@ def _inbox_add(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
             now=now,
             after=args.after,
             fixes=args.fixes,
+            kind=args.kind,
+            min_reviews=min_reviews,
+            reviews=args.reviews,
+            floors=floors,
         )
 
     return _run_op(
@@ -480,6 +531,32 @@ def _heartbeat(args: argparse.Namespace, hive: Path, now: datetime, profile: dic
     )
 
 
+def _heartbeat_loop(args: argparse.Namespace, hive: Path, profile: dict) -> None:
+    """Execution proposals §3: the lease length comes from the profile, never
+    from the skill's prose. SIGTERM (from --stop) ends the loop with exit 0
+    and removes its pid file, after the beat in progress if there is one; a
+    lost lease ends it with exit 2. A loop whose session died (it was
+    reparented) ends with exit 0 and a line saying so, so a dead session
+    never holds a lease forever."""
+    task_id = _require(args.task, "--task")
+    agent = _require(args.agent, "--agent")
+    _resolve_harness(hive, agent, args.harness)
+    lock = acquire_loop_lock(hive, task_id)
+    stop = LoopStop()
+    signal.signal(signal.SIGTERM, stop)
+    try:
+        heartbeat_loop(
+            hive, task_id, agent, ttl=lease_ttl(profile, task_id),
+            beat=lambda at: _summary(args, _heartbeat(args, hive, at, profile)),
+            clock=now_utc, sleep=time.sleep,
+            out=lambda line: print(line, flush=True),
+            err=lambda line: print(line, file=sys.stderr, flush=True),
+            stop=stop, parent=session_ancestry,
+        )
+    finally:
+        release_loop_lock(lock)
+
+
 def _complete(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     task_id = _require(args.task, "--task")
     agent = _require(args.agent, "--agent")
@@ -488,7 +565,7 @@ def _complete(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     result_ref = _require(args.result_ref, "--result-ref")
 
     def op() -> dict:
-        return complete(hive, task_id, agent, now, result_ref, args.note)
+        return complete(hive, task_id, agent, now, result_ref, args.note, verdict=args.verdict)
 
     return _run_op(
         hive,
@@ -539,6 +616,9 @@ def _reject(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
     # --harness is optional; when given it must match the registry (§5 trust).
     _resolve_harness(hive, agent, args.harness)
 
+    if args.cascade:
+        return _reject_cascade(args, hive, now, task_id, agent)
+
     def op() -> dict:
         live = active_holder(hive, task_id, now)
         own_claim = isinstance(live, Holder) and live.agent == agent
@@ -560,6 +640,46 @@ def _reject(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
         now=now,
         allow=[f"claims/{task_id}.json", f"claims/{task_id}.*.json", "store/claims.jsonl"],
     )
+
+
+def _reject_cascade(
+    args: argparse.Namespace, hive: Path, now: datetime, task_id: str, agent: str
+) -> str:
+    """Execution proposals §2: one publish for the whole cascade. The op learns
+    which tasks it tombstones only after the fetch, so the allowlist is a
+    callable over what it wrote: each tombstoned task's claim paths, plus the
+    audit log."""
+    if args.note is not None:
+        raise ValueError("--cascade writes its own note (dependency <T> rejected); drop --note")
+    written: list[str] = []
+
+    def op() -> dict:
+        doc = cascade_reject(hive, agent=agent, task_id=task_id, now=now)
+        written[:] = doc["rejected"]
+        return doc
+
+    def allow() -> list[str]:
+        out = ["store/claims.jsonl"]
+        for tid in written:
+            out += [f"claims/{tid}.json", f"claims/{tid}.*.json"]
+        return out
+
+    doc = _run_op(
+        hive, local=args.local, task_id="__none__", message=f"reject --cascade {task_id}",
+        op=op, agent=agent, now=now, allow=allow,
+    )
+    return _cascade_lines(doc)
+
+
+def _cascade_lines(doc: dict) -> str:
+    lines = [f"rejected {tid}" for tid in doc["rejected"]]
+    lines += [f"already rejected {tid}" for tid in doc["already"]]
+    for skip in doc["skipped"]:
+        chain = f" (chain of {skip['chain_of']})" if skip.get("chain_of") else ""
+        lines.append(
+            f"skipped {skip['task_id']}{chain} held by {skip['agent']} until {skip['expires_at']}"
+        )
+    return "\n".join(lines) or f"nothing waits on {doc['root']}"
 
 
 def _accept(args: argparse.Namespace, hive: Path, now: datetime) -> dict:
@@ -622,7 +742,7 @@ def _run_op(
     op: Callable[[], dict],
     agent: str | None = None,
     now: datetime | None = None,
-    allow: list[str] | None = None,
+    allow: list[str] | Callable[[], list[str]] | None = None,
 ) -> dict:
     if local:
         return op()

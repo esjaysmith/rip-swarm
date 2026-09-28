@@ -136,6 +136,45 @@ class TestBoard(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn(f"unknown task {MISSING}", err.getvalue())
 
+    def test_review_fields_and_the_chain(self):
+        import io
+        from contextlib import redirect_stderr, redirect_stdout
+        from rip_swarm.board import artifact_of, chain
+
+        def add(*argv):
+            out, err = io.StringIO(), io.StringIO()
+            with redirect_stdout(out), redirect_stderr(err):
+                rc = main(["inbox-add", "--hive", str(self.hive), "--local",
+                           "--created-by", "op", *argv])
+            return rc, out.getvalue().split()[1].rstrip(":") if rc == 0 else err.getvalue()
+
+        (self.hive / "profiles").mkdir(exist_ok=True)
+        (self.hive / "profiles" / "default.yaml").write_text(
+            "min_reviews:\n  spec: 1\n", encoding="utf-8")
+        rc, a = add("--title", "Spec", "--kind", "spec")
+        self.assertEqual(rc, 0)
+        _, r1 = add("--title", "Review 1 of Spec", "--reviews", a)
+        _, f1 = add("--title", "Revise Spec after review 1", "--fixes", a)
+        _, plain = add("--title", "Other")
+        board = read_board(self.hive, T0)
+        self.assertEqual((board[a].kind, board[a].min_reviews, board[a].reviews), ("spec", 1, None))
+        self.assertEqual((board[r1].reviews, board[r1].min_reviews), (a, 0))
+        self.assertEqual({artifact_of(board, t) for t in (a, r1, f1)}, {a})
+        self.assertIsNone(artifact_of(board, plain))
+        self.assertEqual([v.task_id for v in chain(board, a)], sorted([r1, f1]))
+        rc, err = add("--title", "x", "--kind", "spec", "--min-reviews", "0")
+        self.assertEqual(rc, 1)
+        self.assertIn("min_reviews for spec is at least 1 (profile)", err)
+        rc, err = add("--title", "x", "--min-reviews", "two")
+        self.assertEqual(rc, 1)
+        self.assertIn("must be an integer >= 0", err)
+        (self.hive / "profiles" / "default.yaml").write_text(
+            "min_reviews:\n  spec: two\n", encoding="utf-8")
+        rc, err = add("--title", "x", "--kind", "spec")                   # Review Focus 5
+        self.assertEqual(rc, 1)
+        self.assertIn("min_reviews", err)
+        self.assertEqual(add("--title", "no kind")[0], 0)                 # still posts
+
 
 if __name__ == "__main__":
     unittest.main()

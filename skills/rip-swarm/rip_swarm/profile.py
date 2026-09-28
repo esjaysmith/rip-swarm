@@ -10,6 +10,7 @@ from rip_swarm.simpleyaml import load_yaml
 DEFAULT_PROFILE = {
     "name": "default",
     "reviews_required_per_plan": 1,
+    "min_reviews": {"spec": 0, "plan": 0, "implementation": 0},
     "orchestrator_lease_ttl": "30m",
     "worker_lease_ttl": "15m",
     "idle_board_after": "10m",
@@ -37,6 +38,21 @@ def deep_merge(base: dict, override: dict) -> dict:
             out[key] = deep_merge(out[key], value)
         else:
             out[key] = copy.deepcopy(value)
+    return out
+
+
+def min_reviews_floors(profile: dict) -> dict[str, int]:
+    """The profile's `min_reviews` map: artifact kind -> the minimum number of
+    independent review rounds, a floor the goal can only raise (execution
+    proposals §5.1). A bad value is an error naming its key, never a silent 0."""
+    raw = profile.get("min_reviews") or {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"profile min_reviews must map each kind to a number, got {raw!r}")
+    out: dict[str, int] = {}
+    for kind, n in raw.items():
+        if isinstance(n, bool) or not isinstance(n, int) or n < 0:
+            raise ValueError(f"profile min_reviews[{kind}] must be an integer >= 0, got {n!r}")
+        out[str(kind)] = n
     return out
 
 

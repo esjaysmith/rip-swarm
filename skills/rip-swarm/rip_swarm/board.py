@@ -64,6 +64,9 @@ class TaskView:
     accepted: bool
     returns: int  # release + expired tombstones
     blocked_by: tuple[str, ...]
+    kind: str | None = None
+    min_reviews: int = 0
+    reviews: str | None = None
 
     @property
     def generation(self) -> int:
@@ -136,12 +139,73 @@ def read_board(hive: Path, now: datetime) -> dict[str, TaskView]:
             accepted=tid in accepted,
             returns=sum(1 for a in acts if a in ("release", "expired")),
             blocked_by=tuple(dep for dep in after if dep not in accepted),
+            kind=doc.get("kind") if isinstance(doc.get("kind"), str) else None,
+            min_reviews=_reviews_needed(doc.get("min_reviews")),
+            reviews=doc.get("reviews") if isinstance(doc.get("reviews"), str) else None,
         )
     return board
 
 
 def fixers(board: dict[str, TaskView], task_id: str) -> list[TaskView]:
     return [view for _tid, view in sorted(board.items()) if view.fixes == task_id]
+
+
+def _reviews_needed(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
+def posting_order(view: TaskView) -> tuple[str, str]:
+    """`created_at` has one-second resolution, so the task id breaks ties
+    (execution proposals §5.3)."""
+    return (view.created_at, view.task_id)
+
+
+def artifact_of(board: dict[str, TaskView], task_id: str) -> str | None:
+    """The reviewed artifact (min_reviews >= 1) whose chain `task_id` is in:
+    itself, the task it `reviews`, or the task it `fixes`. None otherwise."""
+    view = board.get(task_id)
+    if view is None:
+        return None
+    if view.min_reviews >= 1:
+        return task_id
+    for ref in (view.reviews, view.fixes):
+        if ref and ref in board and board[ref].min_reviews >= 1:
+            return ref
+    return None
+
+
+def chain(board: dict[str, TaskView], artifact_id: str) -> list[TaskView]:
+    """Every review and every fix of `artifact_id`, in posting order; the
+    artifact itself is not included."""
+    return sorted(
+        (v for v in board.values() if v.reviews == artifact_id or v.fixes == artifact_id),
+        key=posting_order,
+    )
+
+
+def downstream(board: dict[str, TaskView], root: str) -> list[tuple[str, str | None]]:
+    """Every task a reject of `root` cascades to: the tasks that wait on it
+    through `after`, directly or further down, including a task that waits on
+    several tasks of the walk (execution proposals §2), and the review chain of
+    every reviewed artifact on the way (§5.5). Level by level, sorted within a
+    level. The second item names the artifact whose chain the task is in; it is
+    None for an `after` dependent."""
+    seen, out, frontier = {root}, [], [root]
+    while frontier:
+        level: dict[str, str | None] = {}
+        for tid in frontier:
+            if tid in board and board[tid].min_reviews >= 1:
+                for view in chain(board, tid):
+                    if view.task_id not in seen:
+                        level.setdefault(view.task_id, tid)
+        for tid, view in board.items():
+            if tid not in seen and any(dep in seen for dep in view.after):
+                level.setdefault(tid, None)
+        ordered = sorted(level)
+        out.extend((tid, level[tid]) for tid in ordered)
+        seen.update(ordered)
+        frontier = ordered
+    return out
 
 
 def finished_reason(hive: Path, task_id: str) -> str | None:

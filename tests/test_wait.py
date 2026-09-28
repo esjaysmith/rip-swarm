@@ -25,6 +25,7 @@ from rip_swarm.state import (
     save_state,
     seed_state,
 )
+from rip_swarm.status import status_report
 from rip_swarm.waiter import Wake, run_wait, tick
 
 REG = REGISTRY + "- id: carol\n  harness: claude-code\n  role: worker\n"
@@ -121,6 +122,20 @@ class TestTick(unittest.TestCase):
         self.assertIsNone(self.tick("bob"))
         complete(self.hive, u, "bob", T0, result_ref="rip-swarm/bob@abc1234")
         self.assertIsNone(self.tick("bob"))
+
+    def test_reclaim_after_release_is_not_lease_lost(self):
+        # carol claims and releases t; bob then claims it fresh. bob's new
+        # claim shares the task_id with carol's release tombstone but not her
+        # claim_id, so it is a legitimate re-claim, not `_finalize`'s crash
+        # window (task 5b).
+        t = self._task("t")
+        try_claim(self.hive, t, "carol", "claude-code", T0, 900)
+        release(self.hive, t, "carol", T0)
+        try_claim(self.hive, t, "bob", "grok", T0, 900)
+        wake = self.tick("bob")
+        self.assertTrue(wake is None or wake.reason != "lease-lost")
+        report = status_report(self.hive, T0)
+        self.assertEqual(report["corrupt_claims"], [])
 
     def test_master_hears_each_tombstone_once(self):
         t = self._task("t")

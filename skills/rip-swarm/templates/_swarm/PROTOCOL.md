@@ -76,7 +76,8 @@ Work (project mutation, inbox completion) only after step 5 succeeded for you.
 - A task may list `after` task ids and one `fixes` task id; both must already exist when it is posted.
 - A task is blocked until every `after` task has an acceptance record `accepted/<task_id>.json`, written by the master after the merge is kept. Completing a task does not unblock its dependents.
 - `claim` refuses blocked, completed, rejected and accepted tasks.
-- Rejecting is the only way to drop a task. The master rejects dependents of a rejected task in the same turn.
+- Rejecting is the only way to drop a task. The master rejects the dependents of a rejected task in one publish, `reject --cascade`.
+- A task posted with `--kind spec|plan|implementation` is an artifact. Its `min_reviews` (default: the profile's `min_reviews` for that kind, never lower) is the number of independent review rounds it needs. Review tasks (`--reviews <A>`) complete with `--verdict clean|findings`. Nobody reviews what they wrote, and nobody fixes what they reviewed; `claim` enforces both. `accept` refuses the artifact until it has its rounds and the latest result in its chain is a clean review.
 
 ## Trust
 

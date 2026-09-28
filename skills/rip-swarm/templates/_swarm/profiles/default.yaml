@@ -1,5 +1,9 @@
 name: default
 reviews_required_per_plan: 1
+min_reviews:
+  spec: 0
+  plan: 0
+  implementation: 0
 orchestrator_lease_ttl: 30m
 worker_lease_ttl: 30m
 idle_board_after: 10m

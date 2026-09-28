@@ -460,7 +460,7 @@ def publish(
     agent: str,
     now: datetime,
     max_attempts: int = 5,
-    allow: Iterable[str] | None = None,
+    allow: Iterable[str] | Callable[[], Iterable[str]] | None = None,
     contested: str | None = None,
 ) -> dict:
     """Run `op` in the hive and push the resulting commit (§8.5).
@@ -475,6 +475,9 @@ def publish(
     patterns. Writing outside the allowlist aborts the publish, reverts the tree and
     raises GitopsError: see `_commit_op`.
 
+    A callable `allow` is called after the op, for an op that learns its own
+    write set only once it has read the fetched tree (the reject cascade).
+
     Unpushed local commits (rule): publish never `reset --hard`s over a commit the
     remote does not have. When HEAD is ahead of `@{u}` publish refuses without
     touching history -- ClaimDenied("lost race on remote tip") if the remote tip
@@ -486,7 +489,9 @@ def publish(
     commit is already on the remote.
     """
     hive = hive.resolve()
-    patterns = tuple(default_allow(task_id, agent) if allow is None else allow)
+    fixed = None if callable(allow) else tuple(
+        default_allow(task_id, agent) if allow is None else allow
+    )
     assert_hive_repo(hive)
     assert_clean(hive)
     upstream(hive)
@@ -527,7 +532,7 @@ def publish(
             if denial is not None:
                 raise denial
             raise GitopsError("nothing to commit")
-        _commit_op(hive, message, patterns)
+        _commit_op(hive, message, fixed if fixed is not None else tuple(allow()))
         _push_with_retries(
             hive,
             task_id=task_id,
@@ -643,7 +648,7 @@ def publish_or_apply(
     message: str,
     agent: str | None,
     now: datetime,
-    allow: Iterable[str] | None = None,
+    allow: Iterable[str] | Callable[[], Iterable[str]] | None = None,
 ) -> dict:
     """Publish `op` when the hive has an upstream; otherwise just run it.
 

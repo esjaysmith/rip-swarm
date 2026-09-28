@@ -67,6 +67,8 @@ Only a line that starts with `wake ` is a wake. A harness timeout, a "moved to b
 
 Every git command you run for a task is `WORKTREE=<WORKTREE>; git -C "$WORKTREE" …`: pinned to the worktree, with `WORKTREE` assigned in the same command.
 
+If `<HIVE>/inbox/<id>.json` has `"reviews"`, this is a review task: follow **Review tasks** below instead of steps 1–6.
+
 1. Start the task from `rip-swarm/integration`. Your branch is reused from task to task, so it may still carry an earlier task's commits that were rejected or never accepted. They must not ride into this result. Fill in the first line and run this as **one** command. Run this block **exactly once** per task, right after the claim succeeds (a `SYNC=dirty` run touches nothing, so the re-run it asks for below counts as the same run); never after you have started or committed work for this task (for example after a context reset): it would move this task's commits to `refs/rip-swarm/prev/…`, out of the result, or commit a half-resolved conflict as leftovers. `BUILD_ON` is the sha to build on: the one a task with `fixes` set names in its body, or any sha a task body tells you to build on. For an ordinary task leave it empty (`BUILD_ON=`).
    ```bash
    WORKTREE=<WORKTREE>; AGENT=<AGENT>; BUILD_ON=<sha or nothing>
@@ -96,21 +98,41 @@ Every git command you run for a task is `WORKTREE=<WORKTREE>; git -C "$WORKTREE"
    Read the `SYNC=` line:
    - `SYNC=merged`, `SYNC=none` (no integration branch yet, so nothing to merge) or `SYNC=reset`: carry on. `SYNC=reset` means your branch held commits that integration lacks; they are kept under the ref named by `KEPT=` (`refs/rip-swarm/prev/<AGENT>/<old tip>`), so the master can still review an earlier result by its sha. Mention the ref in your final report.
    - `SYNC=dirty`: `WORKTREE` has uncommitted changes, left over from your own earlier work. Nothing was touched. Commit them with `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit -m "wip: leftovers"` and run the block again; they are then kept under the `KEPT=` ref and stay out of this task.
-   - `SYNC=error` or `BUILD=error`: a merge or reset failed without a conflict. Run `WORKTREE=<WORKTREE>; git -C "$WORKTREE" rev-parse -q --verify MERGE_HEAD >/dev/null && git -C "$WORKTREE" merge --abort`, then `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" release --hive "$HIVE" --task <id> --agent "$AGENT" --note "cannot start from integration: <git error>"`, message the orchestrator, and go back to waiting.
+   - `SYNC=error` or `BUILD=error` (never in a review task: see **Review tasks**): a merge or reset failed without a conflict. Run `WORKTREE=<WORKTREE>; git -C "$WORKTREE" rev-parse -q --verify MERGE_HEAD >/dev/null && git -C "$WORKTREE" merge --abort`, then `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" release --hive "$HIVE" --task <id> --agent "$AGENT" --note "cannot start from integration: <git error>"`, message the orchestrator, and go back to waiting.
 
    Then the merge of `BUILD_ON` (`BUILD=`), which the block always runs when `BUILD_ON` is set:
    - `BUILD=none` (an ordinary task) or `BUILD=merged`: carry on.
-   - `BUILD=conflict`: the conflict **is the work** (a task with `fixes` set, or one whose body names a sha). `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` lists the files. Resolve them in `WORKTREE`, then stage everything and commit the merge without opening an editor: `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit --no-edit`. Release only if the resolution is beyond the task, with a note saying why.
+   - `BUILD=conflict`: the conflict **is the work** (a task with `fixes` set, or one whose body names a sha; never in a review task: see **Review tasks**). `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` lists the files. Resolve them in `WORKTREE`, then stage everything and commit the merge without opening an editor: `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit --no-edit`. Release only if the resolution is beyond the task, with a note saying why.
    - An ordinary task cannot conflict here: its branch is reset onto integration rather than merged. If a merge of integration ever does stop on a conflict, handle it like `SYNC=error` above with the note `cannot merge integration: <files>`.
 2. Do the task in `WORKTREE` only, touching only what the task body allows.
-3. Heartbeat before each long step. While a step is still running, heartbeat again before half the lease has passed (15 minutes at the default 30m lease): `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT"`.
+3. Heartbeat before each long step: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT"`. Around a long edit or test run, start the heartbeat loop in the background instead, the way section 3 starts `wait`:
+   ```bash
+   RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT" --loop
+   ```
+   It reads `worker_lease_ttl` from the profile and heartbeats each time half of it is gone. Stop it with the same command, `--stop` in place of `--loop`, as soon as that step ends, and always before step 4. Exit 1 from `--stop` means the loop has not exited within 60 seconds and may still be publishing: run `--stop` again, and make no hive write until it exits 0. Its end is not a wake. If it ended with exit 2 before you stopped it, you no longer hold the claim: handle it as an exit 2 from `heartbeat` (below).
 4. If `WORKTREE=<WORKTREE>; git -C "$WORKTREE" status --porcelain` shows changes (new files included), stage and commit all of them on `BRANCH`: `WORKTREE=<WORKTREE>; git -C "$WORKTREE" add -A && git -C "$WORKTREE" commit -m "<id>: <headline>"`. If it is clean, `HEAD` is already the result.
 5. Complete it:
    ```bash
    RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; WORKTREE=<WORKTREE>; python3 "$RS/scripts/claim.py" complete --hive "$HIVE" --task <id> --agent "$AGENT" --result-ref "rip-swarm/$AGENT@$(git -C "$WORKTREE" rev-parse --short HEAD)"
    ```
-6. `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/message.py" --hive "$HIVE" --from "$AGENT" --to orchestrator --type result --body "<id>: <one-line headline>"`. Use `--to '*'` if `status.py` shows no orchestrator.
-7. Go back to waiting.
+   `complete` is the handoff: the master is woken by its tombstone and reads the result from `result_ref`. Do not send a result message.
+6. Go back to waiting.
+
+**Review tasks.** A task whose inbox file (`<HIVE>/inbox/<id>.json`) has `"reviews"` asks you to review another task's result, not to change it. Do it this way:
+
+1. Run only step 1's command block, with `BUILD_ON=` the sha the body names, as for a task with `fixes`. On `SYNC=dirty`, do what step 1's `SYNC=dirty` bullet says and run the block again. On any other line, go to step 2 below, never to step 1's other bullets: their release note, `cannot start from integration: …`, is not one the master reads as a review that cannot build, so the chain would wait for it.
+2. If that does not merge cleanly (`SYNC=error`, `BUILD=conflict` or `BUILD=error`), resolve nothing. In all three cases:
+   1. abort a merge only if one is in progress: `WORKTREE=<WORKTREE>; if git -C "$WORKTREE" rev-parse -q --verify MERGE_HEAD >/dev/null; then git -C "$WORKTREE" merge --abort; fi`;
+   2. release the task: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" release --hive "$HIVE" --task <id> --agent "$AGENT" --note "review <id> cannot build on <sha>: conflict"`. `<id>` is this review task and `<sha>` is the `BUILD_ON` value, the sha the body names: never `HEAD`, which after the abort is the integration tip. A master that takes over has only this note to go on;
+   3. message the master with the same text: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/message.py" --hive "$HIVE" --from "$AGENT" --to orchestrator --type note --body "review <id> cannot build on <sha>: conflict"`, and go back to waiting.
+
+   A resolution would land inside the review commit and could be stamped clean, so the master posts a rebase instead.
+3. Start the heartbeat loop in the background before you read the artifact, as ordinary step 3 above does: `RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" heartbeat --hive "$HIVE" --task <id> --agent "$AGENT" --loop`. Stop it with the same command, `--stop` in place of `--loop`, before you `release` or `complete` this task, on every path. Exit 1 from `--stop` means the loop has not exited within 60 seconds and may still be publishing: run `--stop` again, and make no hive write until it exits 0. If it ended with exit 2 before you stopped it, handle it as an exit 2 from `heartbeat` (below).
+4. Read the artifact at that sha, and write the review where the body says: a numbered section appended to the reviewed document, or the file it names for code.
+5. Edit nothing else.
+6. Stop the heartbeat loop, commit it as step 4 does, and complete with step 5's command, `--result-ref` included, plus `--verdict clean` or `--verdict findings`. The verdict is `clean` only when the review has no finding that needs a change. Exit 1 naming `--verdict` means the flag was wrong: the claim is still yours, so fix it and run `complete` again.
+
+`claim` refuses a task of a review chain with exit 2 in three cases: `<agent> wrote part of <A>` (you may not review what you wrote), `<agent> reviewed <A>` (a reviewer may not fix, even after only releasing a review), and `<A> is rejected`. Go back to waiting, as for any exit 2 on `claim`.
 
 **Exit 2 from `heartbeat` or `complete`** means you no longer hold the claim. The message says which:
 - `claim expired`: your lease ran out but nobody took the task. Re-run the claim once (`RS=<RS>; HIVE=<HIVE>; AGENT=<AGENT>; python3 "$RS/scripts/claim.py" --hive "$HIVE" --task <id> --agent "$AGENT"`). If it exits 0, re-run the heartbeat or `complete` that failed and continue.

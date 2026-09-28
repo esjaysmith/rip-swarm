@@ -6,7 +6,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rip_swarm.audit import append_claim_audit
-from rip_swarm.board import blocked_by, finished_reason
+from rip_swarm.board import artifact_of, blocked_by, finished_reason, read_board
 from rip_swarm.ids import new_claim_id
 from rip_swarm.inbox import InboxError, validate_task_id
 from rip_swarm.io import (
@@ -18,6 +18,7 @@ from rip_swarm.io import (
 )
 from rip_swarm.paths import HivePaths
 from rip_swarm.registry import require_agent
+from rip_swarm.reviews import authors, reviewers
 from rip_swarm.timeutil import add_seconds, format_z, parse_z
 
 
@@ -153,7 +154,30 @@ def try_claim(
     waiting = blocked_by(hive, task_id)
     if waiting:
         raise ClaimDenied(f"blocked by {', '.join(waiting)}")
+    _check_chain(hive, task_id, agent, now)
     return _create_claim(hive, task_id, agent, harness, now, lease_seconds, note)
+
+
+def _check_chain(hive: Path, task_id: str, agent: str, now: datetime) -> None:
+    """Execution proposals §5.5: no work starts on the chain of a rejected
+    artifact, no agent reviews text it wrote, and a reviewer never fixes.
+    Checked here, so every claim path is covered. An artifact itself and a
+    task outside every chain pass untouched."""
+    board = read_board(hive, now)
+    artifact_id = artifact_of(board, task_id)
+    if artifact_id is None or artifact_id == task_id:
+        return
+    if board[artifact_id].rejected:
+        raise ClaimDenied(f"{artifact_id} is rejected")
+    view = board[task_id]
+    if view.reviews == artifact_id and agent in authors(hive, board, artifact_id):
+        raise ClaimDenied(
+            f"{agent} wrote part of {artifact_id}; its review must come from another agent"
+        )
+    if view.fixes == artifact_id and agent in reviewers(hive, board, artifact_id, now):
+        raise ClaimDenied(
+            f"{agent} reviewed {artifact_id}; its fixes must come from another agent"
+        )
 
 
 def claim_baton(
@@ -233,6 +257,32 @@ def heartbeat(hive: Path, task_id: str, agent: str, now: datetime, lease_seconds
     return doc
 
 
+def _task_doc(hive: Path, task_id: str) -> dict:
+    try:
+        doc = read_json(HivePaths(hive).inbox_task(task_id))
+    except (OSError, ValueError):
+        return {}
+    return doc if isinstance(doc, dict) else {}
+
+
+def check_verdict(hive: Path, task_id: str, verdict: str | None) -> None:
+    """Execution proposals §5.5: a review task (`reviews` set) completes with
+    `clean` or `findings`, and no other task takes a verdict. This is a usage
+    error, ValueError (exit 1), never ClaimDenied: the worker skill reads exit 2
+    from `complete` as a lost lease."""
+    reviews = _task_doc(hive, task_id).get("reviews")
+    if reviews:
+        if verdict not in ("clean", "findings"):
+            got = "" if verdict is None else f", got {verdict!r}"
+            raise ValueError(
+                f"{task_id} reviews {reviews}: complete needs --verdict clean or findings{got}"
+            )
+    elif verdict is not None:
+        raise ValueError(
+            f"{task_id} is not a review task: --verdict is only for tasks posted with --reviews"
+        )
+
+
 def complete(
     hive: Path,
     task_id: str,
@@ -240,16 +290,20 @@ def complete(
     now: datetime,
     result_ref: str,
     note: str | None = None,
+    verdict: str | None = None,
 ) -> dict:
     if task_id == "orchestrator":
         raise ClaimDenied("orchestrator cannot be completed; use release")
     if not result_ref or not result_ref.strip():
         raise ClaimDenied("complete requires result_ref")
+    check_verdict(hive, task_id, verdict)
     path, doc = _require_holder(hive, task_id, agent, now)
     doc = dict(doc)
     doc["result_ref"] = result_ref.strip()
     if note is not None:
         doc["note"] = note
+    if verdict is not None:
+        doc["verdict"] = verdict
     _finalize(path, doc, "complete", now)
     append_claim_audit(hive, action="complete", claim_doc=doc, now=now, result_ref=doc["result_ref"])
     return doc

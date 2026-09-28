@@ -11,6 +11,7 @@ from rip_swarm.members import list_members
 from rip_swarm.orchestrator import orchestrator_state
 from rip_swarm.paths import HivePaths
 from rip_swarm.registry import known_agents
+from rip_swarm.reviews import chain_state
 from rip_swarm.timeutil import format_z
 
 _ACTIVE_JSON = re.compile(r"[^.]+\.json")
@@ -66,6 +67,13 @@ def status_report(hive: Path, now: datetime) -> dict:
         ],
         "awaiting_acceptance": sorted(t for t, v in board.items() if v.awaiting_acceptance),
         "fixes": {tid: view.fixes for tid, view in sorted(board.items()) if view.fixes},
+        "reviews": {tid: view.reviews for tid, view in sorted(board.items()) if view.reviews},
+        "artifacts": {
+            tid: {"kind": view.kind, "needed": view.min_reviews,
+                  "rounds": chain_state(hive, board, tid).rounds if view.min_reviews else 0}
+            for tid, view in sorted(board.items())
+            if view.kind or view.min_reviews
+        },
     }
 
 
@@ -80,7 +88,6 @@ def format_status(report: dict) -> str:
         "active_claims:",
     ]
     titles = report.get("titles") or {}
-    fixes = report.get("fixes") or {}
     if report["active_claims"]:
         for rec in report["active_claims"]:
             tid = rec["task_id"]
@@ -88,8 +95,7 @@ def format_status(report: dict) -> str:
                 f"  {tid} agent={rec['agent']} expires_at={rec['expires_at']}",
                 titles.get(tid),
             )
-            if tid in fixes:
-                line += f" (fixes {fixes[tid]})"
+            line += _notes(report, tid)
             lines.append(line)
     else:
         lines.append("  (none)")
@@ -97,7 +103,7 @@ def format_status(report: dict) -> str:
         lines,
         "inbox_without_claim",
         [
-            _titled(tid, titles.get(tid)) + (f" (fixes {fixes[tid]})" if tid in fixes else "")
+            _titled(tid, titles.get(tid)) + _notes(report, tid)
             for tid in report["inbox_without_claim"]
         ],
     )
@@ -119,8 +125,7 @@ def format_status(report: dict) -> str:
         lines,
         "blocked",
         [
-            f"{b['task_id']} waiting on {', '.join(b['waiting_on'])}"
-            + (f" (fixes {fixes[b['task_id']]})" if b["task_id"] in fixes else "")
+            f"{b['task_id']} waiting on {', '.join(b['waiting_on'])}" + _notes(report, b["task_id"])
             for b in report.get("blocked", [])
         ],
     )
@@ -128,7 +133,7 @@ def format_status(report: dict) -> str:
         lines,
         "awaiting_acceptance",
         [
-            _titled(tid, titles.get(tid)) + (f" (fixes {fixes[tid]})" if tid in fixes else "")
+            _titled(tid, titles.get(tid)) + _notes(report, tid)
             for tid in report.get("awaiting_acceptance", [])
         ],
     )
@@ -147,6 +152,25 @@ def format_status(report: dict) -> str:
 
 def _titled(line: str, title: str | None) -> str:
     return f"{line} {title}" if title else line
+
+
+def _notes(report: dict, tid: str) -> str:
+    """` (spec, reviews 1/2)`, ` (reviews <A>)`, ` (fixes <X>)`: what a task is
+    in a review chain or a follow-up (execution proposals §5.5)."""
+    out = ""
+    art = (report.get("artifacts") or {}).get(tid)
+    if art:
+        parts = [art["kind"]] if art["kind"] else []
+        if art["needed"]:
+            parts.append(f"reviews {art['rounds']}/{art['needed']}")
+        out += f" ({', '.join(parts)})"
+    reviewed = (report.get("reviews") or {}).get(tid)
+    if reviewed:
+        out += f" (reviews {reviewed})"
+    fixed = (report.get("fixes") or {}).get(tid)
+    if fixed:
+        out += f" (fixes {fixed})"
+    return out
 
 
 def _task_titles(hive: Path) -> dict[str, str]:
